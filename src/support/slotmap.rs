@@ -1,6 +1,5 @@
 use std::{
-    marker::PhantomData,
-    ops::{Index, IndexMut},
+    array::IntoIter, marker::PhantomData, ops::{Index, IndexMut}, path::Iter
 };
 
 pub trait Key: Sized + Copy + PartialEq + Default {
@@ -16,7 +15,7 @@ pub trait Key: Sized + Copy + PartialEq + Default {
 }
 
 pub struct PrimaryMap<K: Key, V> {
-    values: Vec<V>,
+    values: Vec<Option<V>>,
     freelist: Vec<K>,
 }
 
@@ -30,10 +29,10 @@ impl<K: Key, V> PrimaryMap<K, V> {
 
     pub fn insert(&mut self, val: V) -> K {
         if let Some(key) = self.freelist.pop() {
-            self.values[key.index()] = val;
+            self.values[key.index()] = Some(val);
             key
         } else {
-            self.values.push(val);
+            self.values.push(Some(val));
             K::new(self.values.len() - 1)
         }
     }
@@ -43,13 +42,34 @@ impl<K: Key, V> Index<K> for PrimaryMap<K, V> {
     type Output = V;
 
     fn index(&self, index: K) -> &Self::Output {
-        &self.values[index.index()]
+        self.values[index.index()].as_ref().unwrap()
     }
 }
 
 impl<K: Key, V> IndexMut<K> for PrimaryMap<K, V> {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
-        &mut self.values[index.index()]
+        self.values[index.index()].as_mut().unwrap()
+    }
+}
+
+struct PrimaryMapIter< 'i, K: Key, V> {
+    map: &'i PrimaryMap<K, V>,
+    idx: usize
+}
+
+impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
+    type Item = (K, &'i V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.idx < self.map.values.len() {
+            let e = &self.map.values[self.idx];
+            self.idx += 1;
+
+            if let Some(v) = e.as_ref() {
+                return Some((Key::new(self.idx), v));
+            }
+        }
+        return None;
     }
 }
 

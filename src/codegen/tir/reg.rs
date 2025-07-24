@@ -4,13 +4,18 @@ pub enum RegClass {
     Vec(u8),
 }
 
+#[derive(Clone, Copy)]
 pub struct Reg {
     repr: u32,
 }
 
 impl Reg {
+    pub fn virt(_cls: RegClass, id: u32) -> Self {
+        Reg{repr: id}
+    }
+
     pub fn is_virtual(&self) -> bool {
-        todo!();
+        true
     }
 
     pub fn is_fixed(&self) -> bool {
@@ -19,5 +24,9 @@ impl Reg {
 
     pub fn class(&self) -> RegClass {
         todo!();
+    }
+
+    pub fn id(&self) -> u32 {
+        self.repr
     }
 }

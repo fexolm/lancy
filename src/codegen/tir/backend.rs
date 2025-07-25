@@ -7,9 +7,9 @@ pub trait Backend {
 }
 
 pub fn reg_name<B: Backend>(reg: Reg) -> String {
-    if reg.is_virtual() {
-        format!("v{}", reg.id())
-    } else {
-        B::preg_name(reg)
+    match reg.typ() {
+        super::RegType::Virtual => format!("v{}", reg.id()),
+        super::RegType::Physical => B::preg_name(reg),
+        super::RegType::Spill => format!("s{}", reg.id()),
     }
 }

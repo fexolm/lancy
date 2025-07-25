@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::codegen::tir::backend::{Backend, reg_name};
-use crate::codegen::tir::{Reg, RegClass};
+use crate::codegen::tir::{Reg, RegClass, RegType};
 use crate::support::slotmap::PrimaryMap;
 
 use super::{Block, BlockData, Inst};
@@ -21,7 +21,7 @@ impl<B: Backend> Func<B> {
         let args: Vec<_> = arg_types
             .iter()
             .enumerate()
-            .map(|(i, &c)| Reg::virt(c, i as u32))
+            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32))
             .collect();
 
         max_vreg += args.len() as u32;
@@ -29,7 +29,7 @@ impl<B: Backend> Func<B> {
         let results: Vec<_> = result_types
             .iter()
             .enumerate()
-            .map(|(i, &c)| Reg::virt(c, i as u32 + max_vreg))
+            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32 + max_vreg))
             .collect();
 
         max_vreg += results.len() as u32;
@@ -60,7 +60,7 @@ impl<B: Backend> Func<B> {
     }
 
     pub fn new_vreg(&mut self, cls: RegClass) -> Reg {
-        let res = Reg::virt(cls, self.max_vreg);
+        let res = Reg::new(RegType::Virtual, cls, self.max_vreg);
         self.max_vreg += 1;
         res
     }

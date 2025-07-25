@@ -1,6 +1,9 @@
 use std::fmt::Display;
 
-use crate::codegen::tir::{Block, Inst, Reg};
+use crate::codegen::{
+    isa::x64::backend::X64Backend,
+    tir::{self, Block, Inst, Reg},
+};
 
 #[derive(Clone, Copy)]
 pub enum Cond {
@@ -33,14 +36,38 @@ pub struct Mem {
 #[derive(Clone, Copy)]
 pub enum X64Inst {
     Ret,
-    Jmp{dst: Block},
-    CondJmp{cond: Cond, taken: Block, not_taken: Block},
-    Mov64rm{dst: Reg, src: Mem},
-    Mov64mr{dst: Mem, src: Reg},
-    Mov64rr{dst: Reg, src: Reg},
-    Mov64ri64{dst: Reg, src: i64},
-    Mov64mi64{dst: Mem, src: i64},
-    CMP64rr{lhs: Reg, rhs: Reg},
+    Jmp {
+        dst: Block,
+    },
+    CondJmp {
+        cond: Cond,
+        taken: Block,
+        not_taken: Block,
+    },
+    Mov64rm {
+        dst: Reg,
+        src: Mem,
+    },
+    Mov64mr {
+        dst: Mem,
+        src: Reg,
+    },
+    Mov64rr {
+        dst: Reg,
+        src: Reg,
+    },
+    Mov64ri64 {
+        dst: Reg,
+        src: i64,
+    },
+    Mov64mi64 {
+        dst: Mem,
+        src: i64,
+    },
+    CMP64rr {
+        lhs: Reg,
+        rhs: Reg,
+    },
 }
 
 impl Inst for X64Inst {
@@ -53,19 +80,15 @@ impl Inst for X64Inst {
 
     fn is_branch(&self) -> bool {
         match self {
-            X64Inst::Jmp {..} => true,
-            X64Inst::CondJmp {..} => true,
-            _=> false
+            X64Inst::Jmp { .. } => true,
+            X64Inst::CondJmp { .. } => true,
+            _ => false,
         }
     }
 }
 
-fn reg_to_string(reg: &Reg) -> String {
-    if reg.is_virtual() {
-        format!("v{}", reg.id())
-    } else {
-        todo!()
-    }
+fn reg_name(reg: Reg) -> String {
+    tir::reg_name::<X64Backend>(reg)
 }
 
 impl Display for X64Inst {
@@ -73,10 +96,14 @@ impl Display for X64Inst {
         match self {
             X64Inst::Ret => write!(f, "ret"),
             X64Inst::Jmp { dst } => write!(f, "jmp {dst}"),
-            X64Inst::CondJmp { cond, taken, not_taken } => todo!(),
+            X64Inst::CondJmp {
+                cond,
+                taken,
+                not_taken,
+            } => todo!(),
             X64Inst::Mov64rm { dst, src } => todo!(),
             X64Inst::Mov64mr { dst, src } => todo!(),
-            X64Inst::Mov64rr { dst, src } => write!(f, "mov {} {}", reg_to_string(dst), reg_to_string(src)),
+            X64Inst::Mov64rr { dst, src } => write!(f, "mov {} {}", reg_name(*dst), reg_name(*src)),
             X64Inst::Mov64ri64 { dst, src } => todo!(),
             X64Inst::Mov64mi64 { dst, src } => todo!(),
             X64Inst::CMP64rr { lhs, rhs } => todo!(),

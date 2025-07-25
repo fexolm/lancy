@@ -1,9 +1,11 @@
-mod reg;
+mod backend;
 mod block;
-mod inst;
 mod func;
+mod inst;
+mod reg;
 
-pub use reg::*;
+pub use backend::*;
 pub use block::*;
-pub use inst::*;
 pub use func::*;
+pub use inst::*;
+pub use reg::*;

@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub enum RegClass {
     Int(u8),
     Float(u8),
@@ -11,7 +12,7 @@ pub struct Reg {
 
 impl Reg {
     pub fn virt(_cls: RegClass, id: u32) -> Self {
-        Reg{repr: id}
+        Reg { repr: id }
     }
 
     pub fn is_virtual(&self) -> bool {

@@ -1,5 +1,8 @@
 use std::{
-    array::IntoIter, marker::PhantomData, ops::{Index, IndexMut}, path::Iter
+    array::IntoIter,
+    marker::PhantomData,
+    ops::{Index, IndexMut},
+    path::Iter,
 };
 
 pub trait Key: Sized + Copy + PartialEq + Default {
@@ -36,6 +39,10 @@ impl<K: Key, V> PrimaryMap<K, V> {
             K::new(self.values.len() - 1)
         }
     }
+
+    pub fn iter(&self) -> PrimaryMapIter<'_, K, V> {
+        PrimaryMapIter { map: &self, idx: 0 }
+    }
 }
 
 impl<K: Key, V> Index<K> for PrimaryMap<K, V> {
@@ -52,9 +59,9 @@ impl<K: Key, V> IndexMut<K> for PrimaryMap<K, V> {
     }
 }
 
-struct PrimaryMapIter< 'i, K: Key, V> {
+pub struct PrimaryMapIter<'i, K: Key, V> {
     map: &'i PrimaryMap<K, V>,
-    idx: usize
+    idx: usize,
 }
 
 impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
@@ -63,10 +70,11 @@ impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         while self.idx < self.map.values.len() {
             let e = &self.map.values[self.idx];
+            let idx = self.idx;
             self.idx += 1;
 
             if let Some(v) = e.as_ref() {
-                return Some((Key::new(self.idx), v));
+                return Some((Key::new(idx), v));
             }
         }
         return None;

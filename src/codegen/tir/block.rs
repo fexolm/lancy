@@ -6,7 +6,7 @@ slotmap_key!(Block(u16));
 
 impl Display for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "^{}", self.0)
+        write!(f, "@{}", self.0)
     }
 }
 
@@ -24,11 +24,19 @@ impl<I: Inst> BlockData<I> {
     }
 }
 
-impl <I: Inst> Display for BlockData<I> {
+impl<I: Inst> Display for BlockData<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for inst in &self.insts {
             write!(f, "    {inst}\n")?;
         }
         Ok(())
+    }
+}
+
+impl<I: Inst> Default for BlockData<I> {
+    fn default() -> Self {
+        Self {
+            insts: Default::default(),
+        }
     }
 }

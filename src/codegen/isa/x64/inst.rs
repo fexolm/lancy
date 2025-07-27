@@ -5,6 +5,8 @@ use crate::codegen::{
     tir::{self, Block, Inst, Reg},
 };
 
+use smallvec::{SmallVec, smallvec};
+
 #[derive(Clone, Copy)]
 pub enum Cond {
     Z,
@@ -31,6 +33,16 @@ pub struct Mem {
     index: Option<Reg>,
     scale: u8,
     disp: i32,
+}
+
+impl Mem {
+    pub fn get_uses(&self) -> SmallVec<[Reg; 2]> {
+        if let Some(idx) = self.index {
+            smallvec![self.reg, idx]
+        } else {
+            smallvec![self.reg]
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +95,47 @@ impl Inst for X64Inst {
             X64Inst::Jmp { .. } => true,
             X64Inst::CondJmp { .. } => true,
             _ => false,
+        }
+    }
+
+    fn get_uses(&self) -> SmallVec<[Reg; 2]> {
+        match self {
+            X64Inst::Ret => smallvec![],
+            X64Inst::Jmp { .. } => smallvec![],
+            X64Inst::CondJmp { .. } => smallvec![],
+            X64Inst::Mov64rm { dst, src } => src.get_uses(),
+            X64Inst::Mov64mr { dst, src } => {
+                let mut uses: SmallVec<[Reg; 2]> = dst.get_uses();
+                uses.push(*src);
+                uses
+            }
+            X64Inst::Mov64rr { dst, src } => smallvec![*src],
+            X64Inst::Mov64ri64 { dst, src } => smallvec![],
+            X64Inst::Mov64mi64 { dst, src } => dst.get_uses(),
+            X64Inst::CMP64rr { lhs, rhs } => smallvec![*lhs, *rhs],
+        }
+    }
+    fn get_defs(&self) -> SmallVec<[Reg; 1]> {
+        match self {
+            X64Inst::Ret => smallvec![],
+            X64Inst::Jmp { .. } => smallvec![],
+            X64Inst::CondJmp { .. } => smallvec![],
+            X64Inst::Mov64rm { dst, src } => smallvec![*dst],
+            X64Inst::Mov64mr { dst, src } => smallvec![],
+            X64Inst::Mov64rr { dst, src } => smallvec![*dst],
+            X64Inst::Mov64ri64 { dst, src } => smallvec![*dst],
+            X64Inst::Mov64mi64 { dst, src } => todo!(),
+            X64Inst::CMP64rr { lhs, rhs } => todo!(),
+        }
+    }
+
+    fn get_branch_targets(&self) -> SmallVec<[Block; 2]> {
+        match self {
+            X64Inst::Jmp { dst } => smallvec![*dst],
+            X64Inst::CondJmp {
+                taken, not_taken, ..
+            } => smallvec![*taken, *not_taken],
+            _ => smallvec![],
         }
     }
 }

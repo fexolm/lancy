@@ -1,7 +1,8 @@
-use crate::slotmap_key;
+use crate::{codegen::tir::TirError, slotmap_key};
 use std::fmt::Display;
 
 use super::Inst;
+
 slotmap_key!(Block(u16));
 
 impl Display for Block {
@@ -21,6 +22,16 @@ impl<I: Inst> BlockData<I> {
 
     pub fn push(&mut self, inst: I) {
         self.insts.push(inst);
+    }
+
+    pub fn get_terminator(&self) -> Option<I> {
+        if let Some(inst) = self.insts.last()
+            && inst.is_term()
+        {
+            Some(*inst)
+        } else {
+            None
+        }
     }
 }
 

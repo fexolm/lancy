@@ -43,6 +43,10 @@ impl<K: Key, V> PrimaryMap<K, V> {
     pub fn iter(&self) -> PrimaryMapIter<'_, K, V> {
         PrimaryMapIter { map: &self, idx: 0 }
     }
+
+    pub fn len(&self) -> usize {
+        self.values.len() - self.freelist.len()
+    }
 }
 
 impl<K: Key, V> Index<K> for PrimaryMap<K, V> {
@@ -85,7 +89,7 @@ impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
 macro_rules! slotmap_key {
     ($key:ident ($inner_type:ty) ) => {
         use crate::support::slotmap::Key;
-        #[derive(Clone, Copy, PartialEq)]
+        #[derive(Clone, Copy, PartialEq, Debug)]
         pub struct $key($inner_type);
 
         impl Key for $key {
@@ -115,10 +119,17 @@ pub struct SecondaryMap<K: Key, V> {
     phantom: PhantomData<K>,
 }
 
-impl<K: Key, V: Default> SecondaryMap<K, V> {
+impl<K: Key, V: Default + Clone> SecondaryMap<K, V> {
     pub fn new() -> Self {
         Self {
             values: Vec::new(),
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn with_size(size: usize) -> Self {
+        Self {
+            values: vec![Default::default(); size],
             phantom: PhantomData,
         }
     }

@@ -1,10 +1,11 @@
 use std::fmt::Display;
+use std::io::empty;
 
 use crate::codegen::tir::backend::{Backend, reg_name};
-use crate::codegen::tir::{Reg, RegClass, RegType};
+use crate::codegen::tir::{DFG, Reg, RegClass, RegType};
 use crate::support::slotmap::PrimaryMap;
 
-use super::{Block, BlockData, Inst};
+use super::{Block, BlockData, Inst, TirError};
 
 pub struct Func<B: Backend> {
     name: String,
@@ -12,6 +13,7 @@ pub struct Func<B: Backend> {
     max_vreg: u32,
     args: Vec<Reg>,
     results: Vec<Reg>,
+    dfg: DFG,
 }
 
 impl<B: Backend> Func<B> {
@@ -40,6 +42,7 @@ impl<B: Backend> Func<B> {
             blocks: PrimaryMap::new(),
             args,
             results,
+            dfg: DFG::empty(),
         }
     }
 
@@ -79,6 +82,23 @@ impl<B: Backend> Func<B> {
 
     pub fn get_result(&self, i: usize) -> Reg {
         self.results[i]
+    }
+
+    pub fn recalculate_dfg(&mut self) -> Result<(), TirError> {
+        self.dfg = DFG::new(self.blocks.len());
+        for (block, data) in self.blocks.iter() {
+            if let Some(term) = data.get_terminator() {
+                if term.is_branch() {
+                    let targets = term.get_branch_targets();
+                    for t in targets {
+                        self.dfg.add_edge(t, block);
+                    }
+                }
+            } else {
+                return Err(TirError::BlockNotTerminated(block));
+            }
+        }
+        Ok(())
     }
 }
 

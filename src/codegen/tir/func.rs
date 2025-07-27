@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::io::empty;
 
 use crate::codegen::tir::backend::{Backend, reg_name};
-use crate::codegen::tir::{DFG, Reg, RegClass, RegType, dfg};
+use crate::codegen::tir::{CFG, Reg, RegClass, RegType};
 use crate::support::slotmap::PrimaryMap;
 
 use super::{Block, BlockData, Inst, TirError};
@@ -13,7 +13,7 @@ pub struct Func<B: Backend> {
     max_vreg: u32,
     args: Vec<Reg>,
     results: Vec<Reg>,
-    dfg: Option<DFG>,
+    cfg: Option<CFG>,
 }
 
 impl<B: Backend> Func<B> {
@@ -42,7 +42,7 @@ impl<B: Backend> Func<B> {
             blocks: PrimaryMap::new(),
             args,
             results,
-            dfg: None,
+            cfg: None,
         }
     }
 
@@ -88,32 +88,32 @@ impl<B: Backend> Func<B> {
     }
 
     fn recalculate_dfg(&mut self) -> Result<(), TirError> {
-        let mut dfg = DFG::new(self.blocks.len());
+        let mut cfg = CFG::new(self.blocks.len());
         for (block, data) in self.blocks.iter() {
             if let Some(term) = data.get_terminator() {
                 if term.is_branch() {
                     let targets = term.get_branch_targets();
                     for t in targets {
-                        dfg.add_edge(t, block);
+                        cfg.add_edge(t, block);
                     }
                 }
             } else {
                 return Err(TirError::BlockNotTerminated(block));
             }
         }
-        self.dfg = Some(dfg);
+        self.cfg = Some(cfg);
         Ok(())
     }
 
     fn invalidate_dfg(&mut self) {
-        self.dfg = None;
+        self.cfg = None;
     }
 
-    pub fn get_dfg(&mut self) -> Result<&DFG, TirError> {
-        if self.dfg.is_none() {
+    pub fn get_dfg(&mut self) -> Result<&CFG, TirError> {
+        if self.cfg.is_none() {
             self.recalculate_dfg()?;
         }
-        Ok(self.dfg.as_ref().unwrap())
+        Ok(self.cfg.as_ref().unwrap())
     }
 }
 
@@ -141,7 +141,7 @@ impl<B: Backend> Display for Func<B> {
         for (id, data) in self.blocks.iter() {
             write!(f, "{id}")?;
 
-            if let Some(dfg) = &self.dfg {
+            if let Some(dfg) = &self.cfg {
                 write!(
                     f,
                     "    ; preds {:?}, succs: {:?}",

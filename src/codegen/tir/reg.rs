@@ -114,3 +114,53 @@ mod tests {
         test_case(RegType::Spill, RegClass::Vec(32), 61);
     }
 }
+#[test]
+fn test_reg_edge_cases() {
+    // Test minimum id
+    let reg = Reg::new(RegType::Physical, RegClass::Int(1), 0);
+    assert_eq!(reg.typ(), RegType::Physical);
+    assert_eq!(reg.class(), RegClass::Int(1));
+    assert_eq!(reg.id(), 0);
+
+    // Test maximum id
+    let max_id = ID_MASK;
+    let reg = Reg::new(RegType::Virtual, RegClass::Vec(16), max_id);
+    assert_eq!(reg.typ(), RegType::Virtual);
+    assert_eq!(reg.class(), RegClass::Vec(16));
+    assert_eq!(reg.id(), max_id);
+
+    // Test all RegType variants with same class and id
+    let id = 7;
+    let class = RegClass::Float(2);
+    let reg_phys = Reg::new(RegType::Physical, class, id);
+    let reg_virt = Reg::new(RegType::Virtual, class, id);
+    let reg_spill = Reg::new(RegType::Spill, class, id);
+    assert_eq!(reg_phys.typ(), RegType::Physical);
+    assert_eq!(reg_virt.typ(), RegType::Virtual);
+    assert_eq!(reg_spill.typ(), RegType::Spill);
+
+    // Test all RegClass variants with same type and id
+    let id = 3;
+    let reg_int = Reg::new(RegType::Physical, RegClass::Int(8), id);
+    let reg_float = Reg::new(RegType::Physical, RegClass::Float(8), id);
+    let reg_vec = Reg::new(RegType::Physical, RegClass::Vec(8), id);
+    assert_eq!(reg_int.class(), RegClass::Int(8));
+    assert_eq!(reg_float.class(), RegClass::Float(8));
+    assert_eq!(reg_vec.class(), RegClass::Vec(8));
+}
+
+#[test]
+#[should_panic]
+fn test_invalid_size_non_power_of_two() {
+    // Should panic because 3 is not a power of two
+    let _ = Reg::new(RegType::Physical, RegClass::Int(3), 1);
+}
+
+#[test]
+fn test_reg_class_size_encoding() {
+    // Test that sizes are encoded/decoded correctly for powers of two
+    for &size in &[1u8, 2, 4, 8, 16, 32, 64, 128] {
+        let reg = Reg::new(RegType::Physical, RegClass::Vec(size), 5);
+        assert_eq!(reg.class(), RegClass::Vec(size));
+    }
+}

@@ -29,10 +29,7 @@ fn main() {
         b1_data.push(X64Inst::Jmp { dst: block2 });
     }
 
-    if let Err(e) = func.recalculate_dfg() {
-        eprintln!("Error recalculating DFG: {}", e);
-        return;
-    }
+    let _ = func.get_dfg();
 
     println!("{func}");
 }

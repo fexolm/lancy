@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::io::empty;
 
 use crate::codegen::tir::backend::{Backend, reg_name};
-use crate::codegen::tir::{DFG, Reg, RegClass, RegType};
+use crate::codegen::tir::{DFG, Reg, RegClass, RegType, dfg};
 use crate::support::slotmap::PrimaryMap;
 
 use super::{Block, BlockData, Inst, TirError};
@@ -13,7 +13,7 @@ pub struct Func<B: Backend> {
     max_vreg: u32,
     args: Vec<Reg>,
     results: Vec<Reg>,
-    dfg: DFG,
+    dfg: Option<DFG>,
 }
 
 impl<B: Backend> Func<B> {
@@ -42,19 +42,22 @@ impl<B: Backend> Func<B> {
             blocks: PrimaryMap::new(),
             args,
             results,
-            dfg: DFG::empty(),
+            dfg: None,
         }
     }
 
     pub fn add_block(&mut self, data: BlockData<B::Inst>) -> Block {
+        self.invalidate_dfg();
         self.blocks.insert(data)
     }
 
     pub fn add_empty_block(&mut self) -> Block {
+        self.invalidate_dfg();
         self.blocks.insert(Default::default())
     }
 
     pub fn get_block_data_mut(&mut self, block: Block) -> &mut BlockData<B::Inst> {
+        self.invalidate_dfg();
         &mut self.blocks[block]
     }
 
@@ -84,21 +87,33 @@ impl<B: Backend> Func<B> {
         self.results[i]
     }
 
-    pub fn recalculate_dfg(&mut self) -> Result<(), TirError> {
-        self.dfg = DFG::new(self.blocks.len());
+    fn recalculate_dfg(&mut self) -> Result<(), TirError> {
+        let mut dfg = DFG::new(self.blocks.len());
         for (block, data) in self.blocks.iter() {
             if let Some(term) = data.get_terminator() {
                 if term.is_branch() {
                     let targets = term.get_branch_targets();
                     for t in targets {
-                        self.dfg.add_edge(t, block);
+                        dfg.add_edge(t, block);
                     }
                 }
             } else {
                 return Err(TirError::BlockNotTerminated(block));
             }
         }
+        self.dfg = Some(dfg);
         Ok(())
+    }
+
+    fn invalidate_dfg(&mut self) {
+        self.dfg = None;
+    }
+
+    pub fn get_dfg(&mut self) -> Result<&DFG, TirError> {
+        if self.dfg.is_none() {
+            self.recalculate_dfg()?;
+        }
+        Ok(self.dfg.as_ref().unwrap())
     }
 }
 
@@ -124,7 +139,18 @@ impl<B: Backend> Display for Func<B> {
         write!(f, "\n")?;
 
         for (id, data) in self.blocks.iter() {
-            write!(f, "{id}\n{data}")?;
+            write!(f, "{id}")?;
+
+            if let Some(dfg) = &self.dfg {
+                write!(
+                    f,
+                    "    ; preds {:?}, succs: {:?}",
+                    dfg.preds(id),
+                    dfg.succs(id)
+                )?;
+            }
+
+            write!(f, "\n{data}")?;
         }
 
         Ok(())

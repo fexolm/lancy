@@ -1,11 +1,17 @@
 use crate::{codegen::tir::TirError, slotmap_key};
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use super::Inst;
 
 slotmap_key!(Block(u16));
 
 impl Display for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "@{}", self.0)
+    }
+}
+
+impl Debug for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "@{}", self.0)
     }

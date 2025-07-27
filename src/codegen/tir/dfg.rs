@@ -29,4 +29,12 @@ impl DFG {
         self.nodes[successor].predecessors.push(predecessor);
         self.nodes[predecessor].successors.push(successor);
     }
+
+    pub fn preds(&self, block: Block) -> &[Block] {
+        &self.nodes[block].predecessors
+    }
+
+    pub fn succs(&self, block: Block) -> &[Block] {
+        &self.nodes[block].successors
+    }
 }

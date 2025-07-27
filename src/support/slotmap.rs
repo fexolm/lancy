@@ -89,7 +89,7 @@ impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
 macro_rules! slotmap_key {
     ($key:ident ($inner_type:ty) ) => {
         use crate::support::slotmap::Key;
-        #[derive(Clone, Copy, PartialEq, Debug)]
+        #[derive(Clone, Copy, PartialEq)]
         pub struct $key($inner_type);
 
         impl Key for $key {

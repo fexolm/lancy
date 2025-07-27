@@ -16,7 +16,7 @@ pub struct CFG {
 impl CFG {
     pub fn new(size: usize) -> Self {
         Self {
-            nodes: SecondaryMap::with_size(size),
+            nodes: SecondaryMap::with_capacity(size),
         }
     }
 
@@ -31,6 +31,10 @@ impl CFG {
 
     pub fn succs(&self, block: Block) -> &[Block] {
         &self.nodes[block].successors
+    }
+
+    pub fn blocks_count(&self) -> usize {
+        self.nodes.capacity()
     }
 }
 #[cfg(test)]

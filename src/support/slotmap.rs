@@ -127,9 +127,9 @@ impl<K: Key, V: Default + Clone> SecondaryMap<K, V> {
         }
     }
 
-    pub fn with_size(size: usize) -> Self {
+    pub fn with_capacity(cap: usize) -> Self {
         Self {
-            values: vec![Default::default(); size],
+            values: vec![Default::default(); cap],
             phantom: PhantomData,
         }
     }
@@ -140,6 +140,10 @@ impl<K: Key, V: Default + Clone> SecondaryMap<K, V> {
         }
         self.values[key.index()] = val;
         key
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.values.len()
     }
 }
 

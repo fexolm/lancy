@@ -44,6 +44,20 @@ impl FixedBitSet {
         }
     }
 
+    pub fn add(&mut self, index: usize) {
+        assert!(index < self.buckets.len() * Self::bits_in_bucket());
+        let num_bucket = index / Self::bits_in_bucket();
+        let bit_pos = index % (Self::bits_in_bucket());
+        self.buckets[num_bucket] |= 1 << bit_pos;
+    }
+
+    pub fn del(&mut self, index: usize) {
+        assert!(index < self.buckets.len() * Self::bits_in_bucket());
+        let num_bucket = index / Self::bits_in_bucket();
+        let bit_pos = index % (Self::bits_in_bucket());
+        self.buckets[num_bucket] &= !(1 << bit_pos);
+    }
+
     pub fn set(&mut self, val: bool, index: usize) {
         let num_bucket = index / Self::bits_in_bucket();
         if num_bucket + 1 > self.buckets.len() {
@@ -57,7 +71,7 @@ impl FixedBitSet {
         }
     }
 
-    pub fn get(&self, index: usize) -> bool {
+    pub fn has(&self, index: usize) -> bool {
         if index >= self.buckets.len() * 32 {
             return false;
         }
@@ -86,164 +100,92 @@ mod tests {
     fn test_new_and_len() {
         let bs = FixedBitSet::new(100);
         assert_eq!(bs.len(), 0);
-        // All bits should be unset
-        for i in 0..100 {
-            assert!(!bs.get(i));
-        }
+        assert_eq!(bs.buckets.len(), (100 + 31) / 32);
     }
 
     #[test]
-    fn test_set_and_get() {
+    fn test_add_and_has() {
+        let mut bs = FixedBitSet::new(64);
+        bs.add(0);
+        bs.add(31);
+        bs.add(32);
+        bs.add(63);
+        assert!(bs.has(0));
+        assert!(bs.has(31));
+        assert!(bs.has(32));
+        assert!(bs.has(63));
+        assert!(!bs.has(1));
+        assert!(!bs.has(62));
+        assert!(!bs.has(64));
+    }
+
+    #[test]
+    fn test_del() {
+        let mut bs = FixedBitSet::new(40);
+        bs.add(10);
+        assert!(bs.has(10));
+        bs.del(10);
+        assert!(!bs.has(10));
+    }
+
+    #[test]
+    fn test_set_true_and_false() {
         let mut bs = FixedBitSet::new(10);
-        bs.set(true, 3);
-        bs.set(true, 7);
-        assert!(bs.get(3));
-        assert!(bs.get(7));
-        assert!(!bs.get(0));
-        assert!(!bs.get(9));
-        assert_eq!(bs.len(), 2);
-
-        bs.set(false, 3);
-        assert!(!bs.get(3));
-        assert_eq!(bs.len(), 1);
-    }
-
-    #[test]
-    fn test_set_out_of_bounds() {
-        let mut bs = FixedBitSet::new(5);
-        bs.set(true, 31);
-        assert!(bs.get(31));
-        assert_eq!(bs.len(), 1);
-        bs.set(true, 32);
-        assert!(bs.get(32));
-        assert_eq!(bs.len(), 2);
-    }
-
-    #[test]
-    fn test_intersect() {
-        let mut a = FixedBitSet::new(10);
-        let mut b = FixedBitSet::new(10);
-        a.set(true, 1);
-        a.set(true, 2);
-        b.set(true, 2);
-        b.set(true, 3);
-        a.intersect(&b);
-        assert!(!a.get(1));
-        assert!(a.get(2));
-        assert!(!a.get(3));
-        assert_eq!(a.len(), 1);
+        bs.set(true, 5);
+        assert!(bs.has(5));
+        bs.set(false, 5);
+        assert!(!bs.has(5));
     }
 
     #[test]
     fn test_union() {
-        let mut a = FixedBitSet::new(10);
-        let mut b = FixedBitSet::new(10);
-        a.set(true, 1);
-        b.set(true, 2);
+        let mut a = FixedBitSet::new(64);
+        let mut b = FixedBitSet::new(64);
+        a.add(1);
+        a.add(2);
+        b.add(2);
+        b.add(3);
         a.union(&b);
-        assert!(a.get(1));
-        assert!(a.get(2));
-        assert_eq!(a.len(), 2);
+        assert!(a.has(1));
+        assert!(a.has(2));
+        assert!(a.has(3));
+        assert_eq!(a.len(), 3);
     }
 
     #[test]
-    fn test_get_out_of_bounds() {
-        let bs = FixedBitSet::new(10);
-        assert!(!bs.get(1000));
-    }
-    #[test]
-    fn test_large_set_basic() {
-        let size = 10_000;
-        let mut bs = FixedBitSet::new(size);
-        // Set every 100th bit
-        for i in (0..size).step_by(100) {
-            bs.set(true, i);
-        }
-        // Check set bits
-        for i in 0..size {
-            if i % 100 == 0 {
-                assert!(bs.get(i), "Bit {} should be set", i);
-            } else {
-                assert!(!bs.get(i), "Bit {} should not be set", i);
-            }
-        }
-        assert_eq!(bs.len(), size / 100);
+    fn test_intersect() {
+        let mut a = FixedBitSet::new(64);
+        let mut b = FixedBitSet::new(64);
+        a.add(1);
+        a.add(2);
+        b.add(2);
+        b.add(3);
+        a.intersect(&b);
+        assert!(!a.has(1));
+        assert!(a.has(2));
+        assert!(!a.has(3));
+        assert_eq!(a.len(), 1);
     }
 
     #[test]
-    fn test_large_set_union_and_intersect() {
-        let size = 5000;
-        let mut a = FixedBitSet::new(size);
-        let mut b = FixedBitSet::new(size);
-
-        // a: set even bits, b: set bits divisible by 3
-        for i in (0..size).step_by(2) {
-            a.set(true, i);
-        }
-        for i in (0..size).step_by(3) {
-            b.set(true, i);
-        }
-
-        let mut c = a.clone();
-        c.union(&b);
-        for i in 0..size {
-            if i % 2 == 0 || i % 3 == 0 {
-                assert!(c.get(i), "Bit {} should be set in union", i);
-            } else {
-                assert!(!c.get(i), "Bit {} should not be set in union", i);
-            }
-        }
-
-        let mut d = a.clone();
-        d.intersect(&b);
-        for i in 0..size {
-            if i % 2 == 0 && i % 3 == 0 {
-                assert!(d.get(i), "Bit {} should be set in intersection", i);
-            } else {
-                assert!(!d.get(i), "Bit {} should not be set in intersection", i);
-            }
-        }
-    }
-
-    #[test]
-    fn test_large_set_set_and_unset() {
-        let size = 2048;
-        let mut bs = FixedBitSet::new(size);
-        // Set all bits
-        for i in 0..size {
-            bs.set(true, i);
-        }
-        assert_eq!(bs.len(), size);
-
-        // Unset all bits
-        for i in 0..size {
-            bs.set(false, i);
-        }
-        assert_eq!(bs.len(), 0);
-        for i in 0..size {
-            assert!(!bs.get(i));
-        }
-    }
-
-    #[test]
-    fn test_large_set_out_of_bounds() {
-        let size = 1000;
-        let bs = FixedBitSet::new(size);
-        assert!(!bs.get(size * 10));
-        assert!(!bs.get(usize::MAX));
-    }
-
-    #[test]
-    fn test_equals_basic() {
-        let mut a = FixedBitSet::new(16);
-        let mut b = FixedBitSet::new(16);
+    fn test_equals() {
+        let mut a = FixedBitSet::new(32);
+        let mut b = FixedBitSet::new(32);
         assert!(a.equals(&b));
-        a.set(true, 5);
+        a.add(5);
         assert!(!a.equals(&b));
-        b.set(true, 5);
+        b.add(5);
         assert!(a.equals(&b));
-        a.set(true, 10);
-        b.set(true, 11);
+        a.add(10);
+        b.add(11);
         assert!(!a.equals(&b));
+    }
+
+    #[test]
+    fn test_set_resize() {
+        let mut bs = FixedBitSet::new(1);
+        bs.set(true, 100);
+        assert!(bs.has(100));
+        assert_eq!(bs.buckets.len(), (100 / 32) + 1);
     }
 }

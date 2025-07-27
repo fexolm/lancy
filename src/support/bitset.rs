@@ -65,6 +65,18 @@ impl FixedBitSet {
         let bit_pos = index % Self::bits_in_bucket();
         return self.buckets[num_bucket] & (1 << bit_pos) != 0;
     }
+
+    pub fn equals(&self, other: &FixedBitSet) -> bool {
+        if self.buckets.len() != other.buckets.len() {
+            return false;
+        }
+        for (a, b) in self.buckets.iter().zip(other.buckets.iter()) {
+            if a != b {
+                return false;
+            }
+        }
+        true
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -219,5 +231,19 @@ mod tests {
         let bs = FixedBitSet::new(size);
         assert!(!bs.get(size * 10));
         assert!(!bs.get(usize::MAX));
+    }
+
+    #[test]
+    fn test_equals_basic() {
+        let mut a = FixedBitSet::new(16);
+        let mut b = FixedBitSet::new(16);
+        assert!(a.equals(&b));
+        a.set(true, 5);
+        assert!(!a.equals(&b));
+        b.set(true, 5);
+        assert!(a.equals(&b));
+        a.set(true, 10);
+        b.set(true, 11);
+        assert!(!a.equals(&b));
     }
 }

@@ -227,23 +227,133 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_unreachable_block() {
-    //     // 0 -> 1
-    //     // 2 (unreachable)
-    //     let mut cfg = CFG::new(3);
-    //     let b0 = Block::new(0);
-    //     let b1 = Block::new(1);
-    //     let b2 = Block::new(2);
+    #[test]
+    fn test_linear_chain_cfg() {
+        // 0 -> 1 -> 2 -> 3 -> 4
+        let mut cfg = CFG::new(5);
+        for i in 0..4 {
+            cfg.add_edge(Block::new(i + 1), Block::new(i));
+        }
+        let domtree = DomTree::build(&cfg);
 
-    //     cfg.add_edge(b0, b1);
+        for i in 0..5 {
+            for j in i..5 {
+                assert!(domtree.dominates(Block::new(i), Block::new(j)));
+            }
+        }
+        for i in 0..5 {
+            for j in 0..i {
+                assert!(!domtree.dominates(Block::new(i), Block::new(j)));
+            }
+        }
+    }
 
-    //     let domtree = DomTree::build(&cfg);
+    #[test]
+    fn test_cfg_with_loop() {
+        // 0 -> 1 -> 2 -> 3
+        //      ^         |
+        //      |---------|
+        let mut cfg = CFG::new(4);
+        cfg.add_edge(Block::new(1), Block::new(0));
+        cfg.add_edge(Block::new(2), Block::new(1));
+        cfg.add_edge(Block::new(3), Block::new(2));
+        cfg.add_edge(Block::new(1), Block::new(3)); // back edge
 
-    //     assert!(domtree.dominates(b0, b1));
-    //     // Unreachable block should not dominate anything except itself
-    //     assert!(domtree.dominates(b2, b2));
-    //     assert!(!domtree.dominates(b2, b0));
-    //     assert!(!domtree.dominates(b2, b1));
-    // }
+        let domtree = DomTree::build(&cfg);
+
+        // 0 dominates all
+        for i in 1..4 {
+            assert!(domtree.dominates(Block::new(0), Block::new(i)));
+        }
+        // 1 dominates 2 and 3
+        assert!(domtree.dominates(Block::new(1), Block::new(2)));
+        assert!(domtree.dominates(Block::new(1), Block::new(3)));
+        // 2 dominates 3
+        assert!(domtree.dominates(Block::new(2), Block::new(3)));
+        // 3 does not dominate 1 (even with back edge)
+        assert!(!domtree.dominates(Block::new(3), Block::new(1)));
+    }
+
+    #[test]
+    fn test_nested_loops_cfg() {
+        // 0 -> 1 -> 2 -> 3 -> 4 -> 5
+        //      ^    ^    |    |
+        //      |    |----|    |
+        //      | ------------ |
+        //      |         |
+        //      |-----------------|
+        // One outer loop 1-2-3-4-1 and one inner loop 2-3-2
+        let mut cfg = CFG::new(6);
+        cfg.add_edge(Block::new(1), Block::new(0));
+        cfg.add_edge(Block::new(2), Block::new(1));
+        cfg.add_edge(Block::new(3), Block::new(2));
+        cfg.add_edge(Block::new(4), Block::new(3));
+        cfg.add_edge(Block::new(5), Block::new(4));
+        cfg.add_edge(Block::new(1), Block::new(4)); // back edge (outer loop)
+        cfg.add_edge(Block::new(2), Block::new(3)); // back edge (inner loop)
+
+        let domtree = DomTree::build(&cfg);
+
+        // 0 dominates all
+        for i in 1..6 {
+            assert!(domtree.dominates(Block::new(0), Block::new(i)));
+        }
+        // 1 dominates 2, 3, 4, 5
+        for i in 2..6 {
+            assert!(domtree.dominates(Block::new(1), Block::new(i)));
+        }
+        // 2 dominates 3, 4, 5
+        for i in 3..6 {
+            assert!(domtree.dominates(Block::new(2), Block::new(i)));
+        }
+        // 3 dominates 4, 5
+        for i in 4..6 {
+            assert!(domtree.dominates(Block::new(3), Block::new(i)));
+        }
+        // 4 dominates 5
+        assert!(domtree.dominates(Block::new(4), Block::new(5)));
+
+        // 3 does not dominates 2 (inner loop back edge)
+        assert!(!domtree.dominates(Block::new(3), Block::new(2)));
+        // 4 does not dominates 1 (outer loop back edge)
+        assert!(!domtree.dominates(Block::new(4), Block::new(1)));
+
+    }
+
+    #[test]
+    fn test_multiple_loops_cfg() {
+        // 0 -> 1 -> 2 -> 3 -> 4
+        //      ^         |    |
+        //      |---------|    |
+        //                ^----|
+        // Two loops: 1-2-3-1 and 3-4-3
+        let mut cfg = CFG::new(5);
+        cfg.add_edge(Block::new(1), Block::new(0));
+        cfg.add_edge(Block::new(2), Block::new(1));
+        cfg.add_edge(Block::new(3), Block::new(2));
+        cfg.add_edge(Block::new(4), Block::new(3));
+        cfg.add_edge(Block::new(1), Block::new(3)); // back edge (outer loop)
+        cfg.add_edge(Block::new(3), Block::new(4)); // forward edge
+
+        let domtree = DomTree::build(&cfg);
+
+        // 0 dominates all
+        for i in 1..5 {
+            assert!(domtree.dominates(Block::new(0), Block::new(i)));
+        }
+        // 1 dominates 2, 3, 4
+        for i in 2..5 {
+            assert!(domtree.dominates(Block::new(1), Block::new(i)));
+        }
+        // 2 dominates 3, 4
+        for i in 3..5 {
+            assert!(domtree.dominates(Block::new(2), Block::new(i)));
+        }
+        // 3 dominates 4 (inner loop)
+        assert!(domtree.dominates(Block::new(3), Block::new(4)));
+        // 4 does not dominate 3 (inner loop back edge)
+        assert!(!domtree.dominates(Block::new(4), Block::new(3)));
+        // 3 does not dominate 1 (outer loop back edge)
+        assert!(!domtree.dominates(Block::new(3), Block::new(1)));
+    }
 }

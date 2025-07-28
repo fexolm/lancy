@@ -5,7 +5,7 @@ use std::{
     path::Iter,
 };
 
-pub trait Key: Sized + Copy + PartialEq + Default {
+pub trait Key: Sized + Copy + PartialEq {
     fn new(v: usize) -> Self;
 
     fn index(&self) -> usize;
@@ -19,25 +19,20 @@ pub trait Key: Sized + Copy + PartialEq + Default {
 
 pub struct PrimaryMap<K: Key, V> {
     values: Vec<Option<V>>,
-    freelist: Vec<K>,
+    _key: PhantomData<K>,
 }
 
 impl<K: Key, V> PrimaryMap<K, V> {
     pub fn new() -> Self {
         Self {
             values: Vec::new(),
-            freelist: Vec::new(),
+            _key: PhantomData,
         }
     }
 
     pub fn insert(&mut self, val: V) -> K {
-        if let Some(key) = self.freelist.pop() {
-            self.values[key.index()] = Some(val);
-            key
-        } else {
-            self.values.push(Some(val));
-            K::new(self.values.len() - 1)
-        }
+        self.values.push(Some(val));
+        K::new(self.values.len() - 1)
     }
 
     pub fn iter(&self) -> PrimaryMapIter<'_, K, V> {
@@ -45,7 +40,11 @@ impl<K: Key, V> PrimaryMap<K, V> {
     }
 
     pub fn len(&self) -> usize {
-        self.values.len() - self.freelist.len()
+        self.values.len()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = K> {
+        (0..self.values.len()).map(K::new)
     }
 }
 
@@ -85,12 +84,39 @@ impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
     }
 }
 
+macro_rules! impl_slotmap_key {
+    ($type:ty) => {
+        impl Key for $type {
+            fn new(v: usize) -> Self {
+                v as $type
+            }
+
+            fn index(&self) -> usize {
+                *self as usize
+            }
+
+            fn none_val() -> Self {
+                <$type>::max_value()
+            }
+        }
+    };
+}
+impl_slotmap_key!(u8);
+impl_slotmap_key!(u16);
+impl_slotmap_key!(u32);
+impl_slotmap_key!(u64);
+impl_slotmap_key!(i8);
+impl_slotmap_key!(i16);
+impl_slotmap_key!(i32);
+impl_slotmap_key!(i64);
+
 #[macro_export]
 macro_rules! slotmap_key {
     ($key:ident ($inner_type:ty) ) => {
-        use crate::support::slotmap::Key;
         #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq)]
         pub struct $key($inner_type);
+
+        use crate::support::slotmap::Key;
 
         impl Key for $key {
             fn new(v: usize) -> Self {
@@ -105,12 +131,6 @@ macro_rules! slotmap_key {
                 Self(<$inner_type>::max_value())
             }
         }
-
-        impl Default for $key {
-            fn default() -> Self {
-                Self::none_val()
-            }
-        }
     };
 }
 
@@ -119,31 +139,31 @@ pub struct SecondaryMap<K: Key, V> {
     phantom: PhantomData<K>,
 }
 
-impl<K: Key, V: Default + Clone> SecondaryMap<K, V> {
-    pub fn new() -> Self {
+impl<K: Key, V: Clone> SecondaryMap<K, V> {
+    pub fn new(cap: usize, val: V) -> Self {
         Self {
-            values: Vec::new(),
+            values: vec![val.clone(); cap],
             phantom: PhantomData,
         }
     }
 
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            values: vec![Default::default(); cap],
-            phantom: PhantomData,
-        }
-    }
-
-    pub fn insert(&mut self, key: K, val: V) -> K {
-        if self.values.len() <= key.index() {
-            self.values.resize_with(key.index() + 1, Default::default);
-        }
+    pub fn set(&mut self, key: K, val: V) -> K {
         self.values[key.index()] = val;
         key
     }
 
     pub fn capacity(&self) -> usize {
         self.values.len()
+    }
+}
+
+pub trait SecondaryMapExt<K: Key, V: Default + Clone> {
+    fn with_default(cap: usize) -> Self;
+}
+
+impl<K: Key, V: Default + Clone> SecondaryMapExt<K, V> for SecondaryMap<K, V> {
+    fn with_default(cap: usize) -> Self {
+        Self::new(cap, Default::default())
     }
 }
 
@@ -160,5 +180,47 @@ impl<K: Key, V> Index<K> for SecondaryMap<K, V> {
     fn index(&self, index: K) -> &Self::Output {
         assert!(index.index() < self.values.len());
         &self.values[index.index()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+
+    use super::*;
+
+    slotmap_key!(K(u32));
+
+    impl Debug for K {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "K({})", self.0)
+        }
+    }
+
+    #[test]
+    fn test_primary_map() {
+        let mut map = PrimaryMap::new();
+        let key: K = map.insert("value");
+        assert_eq!(map[key], "value");
+    }
+
+    #[test]
+    fn test_secondary_map() {
+        let mut map = SecondaryMap::with_default(10);
+        let key = K::new(0);
+        map.set(key, "value");
+        assert_eq!(map[key], "value");
+    }
+
+    #[test]
+    fn test_primary_map_iter() {
+        let mut map = PrimaryMap::new();
+        map.insert("value1");
+        map.insert("value2");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((K::new(0), &"value1")));
+        assert_eq!(iter.next(), Some((K::new(1), &"value2")));
+        assert_eq!(iter.next(), None);
     }
 }

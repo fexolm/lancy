@@ -14,19 +14,27 @@ pub struct FixedBitSet {
 }
 
 impl FixedBitSet {
-    pub fn new(size: usize) -> Self {
+    fn new(size: usize, value: Word) -> Self {
         use std::cmp::max;
         let words = (size + Self::bits_in_bucket() - 1) / Self::bits_in_bucket();
         let mut buckets = SmallVec::with_capacity(words);
-        buckets.resize(words, 0);
+        buckets.resize(words, value);
         Self { buckets }
+    }
+
+    pub fn zeroes(size: usize) -> Self {
+        Self::new(size, 0)
+    }
+
+    pub fn ones(size: usize) -> Self {
+        Self::new(size, u32::MAX)
     }
 
     fn bits_in_bucket() -> usize {
         return size_of::<Word>() * 8;
     }
 
-    pub fn len(&self) -> usize {
+    pub fn ones_count(&self) -> usize {
         self.buckets.iter().map(|w| w.count_ones() as usize).sum()
     }
 
@@ -41,6 +49,13 @@ impl FixedBitSet {
         debug_assert_eq!(self.buckets.len(), other.buckets.len());
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             *bucket |= other.buckets[i];
+        }
+    }
+
+    pub fn difference(&mut self, other: &FixedBitSet) {
+        debug_assert_eq!(self.buckets.len(), other.buckets.len());
+        for (i, bucket) in self.buckets.iter_mut().enumerate() {
+            *bucket &= !other.buckets[i];
         }
     }
 
@@ -91,6 +106,12 @@ impl FixedBitSet {
         }
         true
     }
+
+    pub fn clear(&mut self) {
+        for bucket in &mut self.buckets {
+            *bucket = 0;
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -98,14 +119,14 @@ mod tests {
 
     #[test]
     fn test_new_and_len() {
-        let bs = FixedBitSet::new(100);
-        assert_eq!(bs.len(), 0);
+        let bs = FixedBitSet::zeroes(100);
+        assert_eq!(bs.ones_count(), 0);
         assert_eq!(bs.buckets.len(), (100 + 31) / 32);
     }
 
     #[test]
     fn test_add_and_has() {
-        let mut bs = FixedBitSet::new(64);
+        let mut bs = FixedBitSet::zeroes(64);
         bs.add(0);
         bs.add(31);
         bs.add(32);
@@ -121,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_del() {
-        let mut bs = FixedBitSet::new(40);
+        let mut bs = FixedBitSet::zeroes(40);
         bs.add(10);
         assert!(bs.has(10));
         bs.del(10);
@@ -130,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_set_true_and_false() {
-        let mut bs = FixedBitSet::new(10);
+        let mut bs = FixedBitSet::zeroes(10);
         bs.set(true, 5);
         assert!(bs.has(5));
         bs.set(false, 5);
@@ -139,8 +160,8 @@ mod tests {
 
     #[test]
     fn test_union() {
-        let mut a = FixedBitSet::new(64);
-        let mut b = FixedBitSet::new(64);
+        let mut a = FixedBitSet::zeroes(64);
+        let mut b = FixedBitSet::zeroes(64);
         a.add(1);
         a.add(2);
         b.add(2);
@@ -149,13 +170,13 @@ mod tests {
         assert!(a.has(1));
         assert!(a.has(2));
         assert!(a.has(3));
-        assert_eq!(a.len(), 3);
+        assert_eq!(a.ones_count(), 3);
     }
 
     #[test]
     fn test_intersect() {
-        let mut a = FixedBitSet::new(64);
-        let mut b = FixedBitSet::new(64);
+        let mut a = FixedBitSet::zeroes(64);
+        let mut b = FixedBitSet::zeroes(64);
         a.add(1);
         a.add(2);
         b.add(2);
@@ -164,13 +185,13 @@ mod tests {
         assert!(!a.has(1));
         assert!(a.has(2));
         assert!(!a.has(3));
-        assert_eq!(a.len(), 1);
+        assert_eq!(a.ones_count(), 1);
     }
 
     #[test]
     fn test_equals() {
-        let mut a = FixedBitSet::new(32);
-        let mut b = FixedBitSet::new(32);
+        let mut a = FixedBitSet::zeroes(32);
+        let mut b = FixedBitSet::zeroes(32);
         assert!(a.equals(&b));
         a.add(5);
         assert!(!a.equals(&b));
@@ -183,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_set_resize() {
-        let mut bs = FixedBitSet::new(1);
+        let mut bs = FixedBitSet::zeroes(1);
         bs.set(true, 100);
         assert!(bs.has(100));
         assert_eq!(bs.buckets.len(), (100 / 32) + 1);

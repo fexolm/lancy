@@ -1,10 +1,10 @@
 use lancy::codegen::{
-    isa::x64::{backend::X64Backend, inst::X64Inst},
+    isa::x64::inst::X64Inst,
     tir::{BlockData, Func, RegClass},
 };
 
 fn main() {
-    let mut func = Func::<X64Backend>::new(
+    let mut func = Func::<X64Inst>::new(
         "foo".to_string(),
         vec![RegClass::Int(8)],
         vec![RegClass::Int(8)],
@@ -29,7 +29,7 @@ fn main() {
         b1_data.push(X64Inst::Jmp { dst: block2 });
     }
 
-    let _ = func.get_dfg();
+    func.construct_cfg().unwrap();
 
     println!("{func}");
 }

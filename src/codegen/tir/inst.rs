@@ -17,4 +17,14 @@ pub trait Inst: Sized + Copy + Display {
     fn get_defs(&self) -> SmallVec<[Reg; 1]>;
 
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]>;
+
+    fn preg_name(reg: Reg) -> String;
+}
+
+pub fn reg_name<I: Inst>(reg: Reg) -> String {
+    match reg.get_type() {
+        super::RegType::Virtual => format!("v{}", reg.get_id()),
+        super::RegType::Physical => I::preg_name(reg),
+        super::RegType::Spill => format!("s{}", reg.get_id()),
+    }
 }

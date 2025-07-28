@@ -6,4 +6,7 @@ use crate::codegen::tir::Block;
 pub enum TirError {
     #[error("Block {0} does not end with a terminator")]
     BlockNotTerminated(Block),
+
+    #[error("Function body is empty")]
+    EmptyFunctionBody,
 }

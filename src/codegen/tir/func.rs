@@ -1,24 +1,23 @@
 use std::fmt::Display;
 use std::io::empty;
 
-use crate::codegen::tir::backend::{Backend, reg_name};
-use crate::codegen::tir::{CFG, Reg, RegClass, RegType};
-use crate::support::slotmap::PrimaryMap;
+use crate::codegen::tir::{CFG, Reg, RegClass, RegType, reg_name};
+use crate::support::slotmap::{Key, PrimaryMap};
 
 use super::{Block, BlockData, Inst, TirError};
 
-pub struct Func<B: Backend> {
+pub struct Func<I: Inst> {
     name: String,
-    blocks: PrimaryMap<Block, BlockData<B::Inst>>,
-    max_vreg: u32,
+    blocks: PrimaryMap<Block, BlockData<I>>,
+    vregs_count: u32,
     args: Vec<Reg>,
     results: Vec<Reg>,
     cfg: Option<CFG>,
 }
 
-impl<B: Backend> Func<B> {
+impl<I: Inst> Func<I> {
     pub fn new(name: String, arg_types: Vec<RegClass>, result_types: Vec<RegClass>) -> Self {
-        let mut max_vreg = 0;
+        let mut vregs_count = 0;
 
         let args: Vec<_> = arg_types
             .iter()
@@ -26,19 +25,19 @@ impl<B: Backend> Func<B> {
             .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32))
             .collect();
 
-        max_vreg += args.len() as u32;
+        vregs_count += args.len() as u32;
 
         let results: Vec<_> = result_types
             .iter()
             .enumerate()
-            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32 + max_vreg))
+            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32 + vregs_count))
             .collect();
 
-        max_vreg += results.len() as u32;
+        vregs_count += results.len() as u32;
 
         Func {
             name,
-            max_vreg,
+            vregs_count,
             blocks: PrimaryMap::new(),
             args,
             results,
@@ -46,7 +45,7 @@ impl<B: Backend> Func<B> {
         }
     }
 
-    pub fn add_block(&mut self, data: BlockData<B::Inst>) -> Block {
+    pub fn add_block(&mut self, data: BlockData<I>) -> Block {
         self.invalidate_dfg();
         self.blocks.insert(data)
     }
@@ -56,18 +55,18 @@ impl<B: Backend> Func<B> {
         self.blocks.insert(Default::default())
     }
 
-    pub fn get_block_data_mut(&mut self, block: Block) -> &mut BlockData<B::Inst> {
+    pub fn get_block_data_mut(&mut self, block: Block) -> &mut BlockData<I> {
         self.invalidate_dfg();
         &mut self.blocks[block]
     }
 
-    pub fn get_block_data(&self, block: Block) -> &BlockData<B::Inst> {
+    pub fn get_block_data(&self, block: Block) -> &BlockData<I> {
         &self.blocks[block]
     }
 
     pub fn new_vreg(&mut self, cls: RegClass) -> Reg {
-        let res = Reg::new(RegType::Virtual, cls, self.max_vreg);
-        self.max_vreg += 1;
+        let res = Reg::new(RegType::Virtual, cls, self.vregs_count);
+        self.vregs_count += 1;
         res
     }
 
@@ -87,8 +86,9 @@ impl<B: Backend> Func<B> {
         self.results[i]
     }
 
-    fn recalculate_dfg(&mut self) -> Result<(), TirError> {
-        let mut cfg = CFG::new(self.blocks.len());
+    pub fn construct_cfg(&mut self) -> Result<(), TirError> {
+        let entry = self.get_entry_block().ok_or(TirError::EmptyFunctionBody)?;
+        let mut cfg = CFG::new(entry, self.blocks.len());
         for (block, data) in self.blocks.iter() {
             if let Some(term) = data.get_terminator() {
                 if term.is_branch() {
@@ -109,31 +109,44 @@ impl<B: Backend> Func<B> {
         self.cfg = None;
     }
 
-    pub fn get_dfg(&mut self) -> Result<&CFG, TirError> {
-        if self.cfg.is_none() {
-            self.recalculate_dfg()?;
+    pub fn get_cfg(&self) -> &CFG {
+        self.cfg.as_ref().unwrap()
+    }
+
+    pub fn get_vregs_count(&self) -> usize {
+        self.vregs_count as usize
+    }
+
+    pub fn get_entry_block(&self) -> Option<Block> {
+        if self.blocks.len() > 0 {
+            Some(Block::new(0))
+        } else {
+            None
         }
-        Ok(self.cfg.as_ref().unwrap())
+    }
+
+    pub fn blocks_iter(&self) -> impl Iterator<Item = (Block, &BlockData<I>)> {
+        self.blocks.iter()
     }
 }
 
-impl<B: Backend> Display for Func<B> {
+impl<I: Inst> Display for Func<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fn {}(", self.name)?;
 
         if self.args.len() > 0 {
             for &arg in &self.args[..self.args.len() - 1] {
-                write!(f, "{}, ", reg_name::<B>(arg))?;
+                write!(f, "{}, ", reg_name::<I>(arg))?;
             }
-            write!(f, "{})", reg_name::<B>(*self.args.last().unwrap()))?;
+            write!(f, "{})", reg_name::<I>(*self.args.last().unwrap()))?;
         }
 
         if self.results.len() > 0 {
             write!(f, " -> (")?;
             for &res in &self.results[..self.results.len() - 1] {
-                write!(f, "{}, ", reg_name::<B>(res))?;
+                write!(f, "{}, ", reg_name::<I>(res))?;
             }
-            write!(f, "{})", reg_name::<B>(*self.results.last().unwrap()))?;
+            write!(f, "{})", reg_name::<I>(*self.results.last().unwrap()))?;
         }
 
         write!(f, "\n")?;

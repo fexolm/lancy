@@ -1,9 +1,6 @@
 use std::fmt::Display;
 
-use crate::codegen::{
-    isa::x64::backend::X64Backend,
-    tir::{self, Block, Inst, Reg},
-};
+use crate::codegen::tir::{self, Block, Inst, Reg};
 
 use smallvec::{SmallVec, smallvec};
 
@@ -138,10 +135,14 @@ impl Inst for X64Inst {
             _ => smallvec![],
         }
     }
+
+    fn preg_name(reg: crate::codegen::tir::Reg) -> String {
+        todo!()
+    }
 }
 
 fn reg_name(reg: Reg) -> String {
-    tir::reg_name::<X64Backend>(reg)
+    tir::reg_name::<X64Inst>(reg)
 }
 
 impl Display for X64Inst {

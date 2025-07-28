@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 
 use crate::codegen::tir::Block;
-use crate::support::slotmap::SecondaryMap;
+use crate::support::slotmap::{SecondaryMap, SecondaryMapExt};
 
 #[derive(Default, Clone)]
 struct CFGNode {
@@ -11,12 +11,14 @@ struct CFGNode {
 
 pub struct CFG {
     nodes: SecondaryMap<Block, CFGNode>,
+    entry: Block,
 }
 
 impl CFG {
-    pub fn new(size: usize) -> Self {
+    pub fn new(entry: Block, size: usize) -> Self {
         Self {
-            nodes: SecondaryMap::with_capacity(size),
+            nodes: SecondaryMap::with_default(size),
+            entry,
         }
     }
 
@@ -36,6 +38,10 @@ impl CFG {
     pub fn blocks_count(&self) -> usize {
         self.nodes.capacity()
     }
+
+    pub fn get_entry_block(&self) -> Block {
+        self.entry
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -45,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_add_edge_and_query() {
-        let mut cfg = CFG::new(3);
+        let mut cfg = CFG::new(Block::new(0), 3);
         let b0 = Block::new(0);
         let b1 = Block::new(1);
         let b2 = Block::new(2);
@@ -63,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_multiple_edges() {
-        let mut cfg = CFG::new(4);
+        let mut cfg = CFG::new(Block::new(0), 4);
         let b0 = Block::new(0);
         let b1 = Block::new(1);
         let b2 = Block::new(2);
@@ -84,7 +90,7 @@ mod tests {
 
     #[test]
     fn test_no_edges() {
-        let cfg = CFG::new(2);
+        let cfg = CFG::new(Block::new(0), 2);
         let b0 = Block::new(0);
         let b1 = Block::new(1);
 

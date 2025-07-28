@@ -1,8 +1,8 @@
 use crate::{
-    codegen::tir::{Block, CFG},
+    codegen::tir::{Block, CFG, Func, Inst},
     support::{
         bitset::FixedBitSet,
-        slotmap::{Key, SecondaryMap},
+        slotmap::{Key, SecondaryMap, SecondaryMapExt},
     },
 };
 
@@ -20,7 +20,7 @@ pub struct DomTree {
 impl DomTree {
     pub fn build(cfg: &CFG) -> Self {
         let mut res = Self {
-            nodes: SecondaryMap::with_capacity(cfg.blocks_count()),
+            nodes: SecondaryMap::with_default(cfg.blocks_count()),
             reverse_postorder: Vec::new(),
         };
         res.compute(cfg);
@@ -33,10 +33,10 @@ impl DomTree {
     }
 
     fn compute_postorder(&mut self, cfg: &CFG) {
-        let mut visited = FixedBitSet::new(cfg.blocks_count());
+        let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
 
         let mut stack = Vec::new();
-        let entry = Block::new(0);
+        let entry = cfg.get_entry_block();
         stack.push(entry);
 
         while let Some(block) = stack.pop() {
@@ -144,7 +144,7 @@ mod tests {
         // Construct a simple CFG:
         // 0 -> 1 -> 2
         //      \-> 3
-        let mut cfg = CFG::new(4);
+        let mut cfg = CFG::new(Block::new(0), 4);
         let b0 = Block::new(0);
         let b1 = Block::new(1);
         let b2 = Block::new(2);
@@ -164,7 +164,7 @@ mod tests {
         // 1   2
         //  \ /
         //   3
-        let mut cfg = CFG::new(4);
+        let mut cfg = CFG::new(Block::new(0), 4);
         let b0 = Block::new(0);
         let b1 = Block::new(1);
         let b2 = Block::new(2);
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_linear_chain_cfg() {
         // 0 -> 1 -> 2 -> 3 -> 4
-        let mut cfg = CFG::new(5);
+        let mut cfg = CFG::new(Block::new(0), 5);
         for i in 0..4 {
             cfg.add_edge(Block::new(i + 1), Block::new(i));
         }
@@ -253,7 +253,7 @@ mod tests {
         // 0 -> 1 -> 2 -> 3
         //      ^         |
         //      |---------|
-        let mut cfg = CFG::new(4);
+        let mut cfg = CFG::new(Block::new(0), 4);
         cfg.add_edge(Block::new(1), Block::new(0));
         cfg.add_edge(Block::new(2), Block::new(1));
         cfg.add_edge(Block::new(3), Block::new(2));
@@ -280,10 +280,8 @@ mod tests {
         //      ^    ^    |    |
         //      |    |----|    |
         //      | ------------ |
-        //      |         |
-        //      |-----------------|
         // One outer loop 1-2-3-4-1 and one inner loop 2-3-2
-        let mut cfg = CFG::new(6);
+        let mut cfg = CFG::new(Block::new(0), 6);
         cfg.add_edge(Block::new(1), Block::new(0));
         cfg.add_edge(Block::new(2), Block::new(1));
         cfg.add_edge(Block::new(3), Block::new(2));
@@ -317,7 +315,6 @@ mod tests {
         assert!(!domtree.dominates(Block::new(3), Block::new(2)));
         // 4 does not dominates 1 (outer loop back edge)
         assert!(!domtree.dominates(Block::new(4), Block::new(1)));
-
     }
 
     #[test]
@@ -327,7 +324,7 @@ mod tests {
         //      |---------|    |
         //                ^----|
         // Two loops: 1-2-3-1 and 3-4-3
-        let mut cfg = CFG::new(5);
+        let mut cfg = CFG::new(Block::new(0), 5);
         cfg.add_edge(Block::new(1), Block::new(0));
         cfg.add_edge(Block::new(2), Block::new(1));
         cfg.add_edge(Block::new(3), Block::new(2));
@@ -355,5 +352,35 @@ mod tests {
         assert!(!domtree.dominates(Block::new(4), Block::new(3)));
         // 3 does not dominate 1 (outer loop back edge)
         assert!(!domtree.dominates(Block::new(3), Block::new(1)));
+    }
+
+    #[test]
+    fn test_large_graph() {
+        // Create a graph with 20 nodes
+        // 0 -> 1 -> 2 -> ... -> 19
+        // and some random connections to make it more interesting
+        let mut cfg = CFG::new(Block::new(0), 20);
+        for i in 0..19 {
+            cfg.add_edge(Block::new(i + 1), Block::new(i));
+        }
+
+        // Add some random connections
+        cfg.add_edge(Block::new(5), Block::new(15));
+        cfg.add_edge(Block::new(12), Block::new(3));
+        cfg.add_edge(Block::new(7), Block::new(18));
+        cfg.add_edge(Block::new(1), Block::new(9));
+
+        let domtree = DomTree::build(&cfg);
+
+        // Check some dominance relations
+        assert!(domtree.dominates(Block::new(0), Block::new(5)));
+        assert!(domtree.dominates(Block::new(0), Block::new(10)));
+        assert!(domtree.dominates(Block::new(0), Block::new(19)));
+        assert!(domtree.dominates(Block::new(1), Block::new(5)));
+        assert!(domtree.dominates(Block::new(1), Block::new(10)));
+
+        // Check some non-dominance relations
+        assert!(!domtree.dominates(Block::new(5), Block::new(0)));
+        assert!(!domtree.dominates(Block::new(10), Block::new(1)));
     }
 }

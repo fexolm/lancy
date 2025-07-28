@@ -38,7 +38,7 @@ impl Reg {
         }
     }
 
-    pub fn typ(self) -> RegType {
+    pub fn get_type(self) -> RegType {
         if self.repr & VIRT_BIT != 0 {
             RegType::Virtual
         } else if self.repr & SPILL_BIT != 0 {
@@ -48,7 +48,7 @@ impl Reg {
         }
     }
 
-    pub fn class(self) -> RegClass {
+    pub fn get_class(self) -> RegClass {
         let size = 1 << self.reg_class_size();
 
         if self.repr & REG_CLASS_INT_BIT != 0 {
@@ -60,7 +60,7 @@ impl Reg {
         }
     }
 
-    pub fn id(self) -> u32 {
+    pub fn get_id(self) -> u32 {
         self.repr & ID_MASK
     }
 
@@ -105,9 +105,9 @@ mod tests {
     fn test_reg() {
         fn test_case(typ: RegType, cls: RegClass, id: u32) {
             let reg = Reg::new(typ, cls, id);
-            assert_eq!(reg.typ(), typ);
-            assert_eq!(reg.class(), cls);
-            assert_eq!(reg.id(), id);
+            assert_eq!(reg.get_type(), typ);
+            assert_eq!(reg.get_class(), cls);
+            assert_eq!(reg.get_id(), id);
         }
         test_case(RegType::Physical, RegClass::Float(8), 12);
         test_case(RegType::Virtual, RegClass::Int(4), 48);
@@ -118,16 +118,16 @@ mod tests {
 fn test_reg_edge_cases() {
     // Test minimum id
     let reg = Reg::new(RegType::Physical, RegClass::Int(1), 0);
-    assert_eq!(reg.typ(), RegType::Physical);
-    assert_eq!(reg.class(), RegClass::Int(1));
-    assert_eq!(reg.id(), 0);
+    assert_eq!(reg.get_type(), RegType::Physical);
+    assert_eq!(reg.get_class(), RegClass::Int(1));
+    assert_eq!(reg.get_id(), 0);
 
     // Test maximum id
     let max_id = ID_MASK;
     let reg = Reg::new(RegType::Virtual, RegClass::Vec(16), max_id);
-    assert_eq!(reg.typ(), RegType::Virtual);
-    assert_eq!(reg.class(), RegClass::Vec(16));
-    assert_eq!(reg.id(), max_id);
+    assert_eq!(reg.get_type(), RegType::Virtual);
+    assert_eq!(reg.get_class(), RegClass::Vec(16));
+    assert_eq!(reg.get_id(), max_id);
 
     // Test all RegType variants with same class and id
     let id = 7;
@@ -135,18 +135,18 @@ fn test_reg_edge_cases() {
     let reg_phys = Reg::new(RegType::Physical, class, id);
     let reg_virt = Reg::new(RegType::Virtual, class, id);
     let reg_spill = Reg::new(RegType::Spill, class, id);
-    assert_eq!(reg_phys.typ(), RegType::Physical);
-    assert_eq!(reg_virt.typ(), RegType::Virtual);
-    assert_eq!(reg_spill.typ(), RegType::Spill);
+    assert_eq!(reg_phys.get_type(), RegType::Physical);
+    assert_eq!(reg_virt.get_type(), RegType::Virtual);
+    assert_eq!(reg_spill.get_type(), RegType::Spill);
 
     // Test all RegClass variants with same type and id
     let id = 3;
     let reg_int = Reg::new(RegType::Physical, RegClass::Int(8), id);
     let reg_float = Reg::new(RegType::Physical, RegClass::Float(8), id);
     let reg_vec = Reg::new(RegType::Physical, RegClass::Vec(8), id);
-    assert_eq!(reg_int.class(), RegClass::Int(8));
-    assert_eq!(reg_float.class(), RegClass::Float(8));
-    assert_eq!(reg_vec.class(), RegClass::Vec(8));
+    assert_eq!(reg_int.get_class(), RegClass::Int(8));
+    assert_eq!(reg_float.get_class(), RegClass::Float(8));
+    assert_eq!(reg_vec.get_class(), RegClass::Vec(8));
 }
 
 #[test]
@@ -161,6 +161,6 @@ fn test_reg_class_size_encoding() {
     // Test that sizes are encoded/decoded correctly for powers of two
     for &size in &[1u8, 2, 4, 8, 16, 32, 64, 128] {
         let reg = Reg::new(RegType::Physical, RegClass::Vec(size), 5);
-        assert_eq!(reg.class(), RegClass::Vec(size));
+        assert_eq!(reg.get_class(), RegClass::Vec(size));
     }
 }

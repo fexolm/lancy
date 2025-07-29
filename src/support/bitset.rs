@@ -107,6 +107,14 @@ impl FixedBitSet {
         true
     }
 
+    pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
+            (0..Self::bits_in_bucket())
+                .filter(move |j| bucket & (1 << j) != 0)
+                .map(move |j| i * Self::bits_in_bucket() + j)
+        })
+    }
+
     pub fn clear(&mut self) {
         for bucket in &mut self.buckets {
             *bucket = 0;
@@ -208,5 +216,15 @@ mod tests {
         bs.set(true, 100);
         assert!(bs.has(100));
         assert_eq!(bs.buckets.len(), (100 / 32) + 1);
+    }
+
+    #[test]
+    fn test_iter_ones() {
+        let mut bs = FixedBitSet::zeroes(64);
+        bs.add(1);
+        bs.add(3);
+        bs.add(32);
+        let ones: Vec<usize> = bs.iter_ones().collect();
+        assert_eq!(ones, vec![1, 3, 32]);
     }
 }

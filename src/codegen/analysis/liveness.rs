@@ -91,7 +91,7 @@ impl LivenessAnalysis {
 
             for r in uses {
                 let id = r.get_id() as usize;
-                if r.get_type() == RegType::Virtual && block_defs.has(id) {
+                if r.get_type() == RegType::Virtual && !block_defs.has(id) {
                     block_uses.add(id);
                 }
             }
@@ -146,10 +146,6 @@ impl LivenessAnalysis {
             }
         }
     }
-
-    pub fn get_life_range(&self, reg_id: u32) -> &[Block] {
-        &self.live_ranges[reg_id]
-    }
 }
 
 #[cfg(test)]
@@ -162,6 +158,12 @@ mod tests {
 
     #[test]
     fn simple_test() {
+        // fn foo(v0) -> (v1)
+        // @0
+        //     jmp @1
+        // @1
+        //     mov v1 v0
+        //     ret
         let mut func = Func::new(
             "foo".to_string(),
             vec![RegClass::Int(8)],
@@ -190,7 +192,81 @@ mod tests {
         func.construct_cfg().unwrap();
         let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
 
-        let live_range = analysis.get_life_range(0);
-        assert_eq!(live_range, &[block1, block2]);
+        assert_eq!(
+            analysis.live_in[block1].iter_ones().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            analysis.live_out[block1].iter_ones().collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn test_temporary_variable() {
+        // fn foo(v0) -> (v1)
+        // @0
+        //     jmp @1
+        // @1
+        //     mov v2 v0
+        //     jmp @2
+        // @2
+        //     mov v1 v2
+        //     ret
+
+        let mut func = Func::new(
+            "foo".to_string(),
+            vec![RegClass::Int(8)],
+            vec![RegClass::Int(8)],
+        );
+
+        let block0 = func.add_empty_block();
+        let block1 = func.add_empty_block();
+        let block2 = func.add_empty_block();
+
+        let v0 = func.get_arg(0);
+        let v1 = func.get_result(0);
+        let v2 = func.new_vreg(RegClass::Int(8));
+
+        {
+            let mut block_data = func.get_block_data_mut(block0);
+            block_data.push(X64Inst::Jmp { dst: block1 });
+        }
+        {
+            let mut block_data = func.get_block_data_mut(block1);
+            block_data.push(X64Inst::Mov64rr { src: v0, dst: v2 });
+            block_data.push(X64Inst::Jmp { dst: block2 });
+        }
+        {
+            let mut block_data = func.get_block_data_mut(block2);
+            block_data.push(X64Inst::Mov64rr { src: v2, dst: v1 });
+            block_data.push(X64Inst::Ret);
+        }
+        func.construct_cfg().unwrap();
+        let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
+        assert_eq!(
+            analysis.live_in[block0].iter_ones().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            analysis.live_out[block0].iter_ones().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            analysis.live_in[block1].iter_ones().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            analysis.live_out[block1].iter_ones().collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            analysis.live_in[block2].iter_ones().collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            analysis.live_out[block2].iter_ones().collect::<Vec<_>>(),
+            vec![]
+        );
     }
 }

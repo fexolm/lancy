@@ -43,6 +43,10 @@ impl<I: Inst> BlockData<I> {
     pub fn iter(&self) -> impl Iterator<Item = &I> {
         self.insts.iter()
     }
+
+    pub fn len(&self) -> usize {
+        self.insts.len()
+    }
 }
 
 impl<I: Inst> Display for BlockData<I> {

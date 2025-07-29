@@ -10,37 +10,17 @@ pub struct Func<I: Inst> {
     name: String,
     blocks: PrimaryMap<Block, BlockData<I>>,
     vregs_count: u32,
-    args: Vec<Reg>,
-    results: Vec<Reg>,
     cfg: Option<CFG>,
 }
 
 impl<I: Inst> Func<I> {
-    pub fn new(name: String, arg_types: Vec<RegClass>, result_types: Vec<RegClass>) -> Self {
+    pub fn new(name: String) -> Self {
         let mut vregs_count = 0;
-
-        let args: Vec<_> = arg_types
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32))
-            .collect();
-
-        vregs_count += args.len() as u32;
-
-        let results: Vec<_> = result_types
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| Reg::new(RegType::Virtual, c, i as u32 + vregs_count))
-            .collect();
-
-        vregs_count += results.len() as u32;
 
         Func {
             name,
             vregs_count,
             blocks: PrimaryMap::new(),
-            args,
-            results,
             cfg: None,
         }
     }
@@ -68,22 +48,6 @@ impl<I: Inst> Func<I> {
         let res = Reg::new(RegType::Virtual, cls, self.vregs_count);
         self.vregs_count += 1;
         res
-    }
-
-    pub fn num_args(&self) -> usize {
-        self.args.len()
-    }
-
-    pub fn get_arg(&self, i: usize) -> Reg {
-        self.args[i]
-    }
-
-    pub fn num_results(&self) -> usize {
-        self.results.len()
-    }
-
-    pub fn get_result(&self, i: usize) -> Reg {
-        self.results[i]
     }
 
     pub fn construct_cfg(&mut self) -> Result<(), TirError> {
@@ -132,24 +96,7 @@ impl<I: Inst> Func<I> {
 
 impl<I: Inst> Display for Func<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "fn {}(", self.name)?;
-
-        if self.args.len() > 0 {
-            for &arg in &self.args[..self.args.len() - 1] {
-                write!(f, "{}, ", reg_name::<I>(arg))?;
-            }
-            write!(f, "{})", reg_name::<I>(*self.args.last().unwrap()))?;
-        }
-
-        if self.results.len() > 0 {
-            write!(f, " -> (")?;
-            for &res in &self.results[..self.results.len() - 1] {
-                write!(f, "{}, ", reg_name::<I>(res))?;
-            }
-            write!(f, "{})", reg_name::<I>(*self.results.last().unwrap()))?;
-        }
-
-        write!(f, "\n")?;
+        write!(f, "{}:\n", self.name)?;
 
         for (id, data) in self.blocks.iter() {
             write!(f, "{id}")?;

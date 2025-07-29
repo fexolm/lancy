@@ -19,6 +19,8 @@ pub trait Inst: Sized + Copy + Display {
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]>;
 
     fn preg_name(reg: Reg) -> String;
+
+    fn preg_count() -> usize;
 }
 
 pub fn reg_name<I: Inst>(reg: Reg) -> String {

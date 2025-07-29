@@ -183,6 +183,11 @@ impl<K: Key, V> Index<K> for SecondaryMap<K, V> {
     }
 }
 
+pub struct SecondaryMapIterMut<'i, K: Key, V> {
+    map: &'i mut SecondaryMap<K, V>,
+    idx: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;

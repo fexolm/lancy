@@ -1,6 +1,9 @@
 use std::fmt::Display;
 
-use crate::codegen::tir::{self, Block, Inst, Reg};
+use crate::codegen::{
+    isa::x64::regs::*,
+    tir::{self, Block, Inst, Reg},
+};
 
 use smallvec::{SmallVec, smallvec};
 
@@ -137,7 +140,29 @@ impl Inst for X64Inst {
     }
 
     fn preg_name(reg: crate::codegen::tir::Reg) -> String {
-        todo!()
+        match reg {
+            RAX => "rax".to_string(),
+            RBX => "rbx".to_string(),
+            RCX => "rcx".to_string(),
+            RDX => "rdx".to_string(),
+            RSI => "rsi".to_string(),
+            RDI => "rdi".to_string(),
+            RSP => "rsp".to_string(),
+            RBP => "rbp".to_string(),
+            R8 => "r8".to_string(),
+            R9 => "r9".to_string(),
+            R10 => "r10".to_string(),
+            R11 => "r11".to_string(),
+            R12 => "r12".to_string(),
+            R13 => "r13".to_string(),
+            R14 => "r14".to_string(),
+            R15 => "r15".to_string(),
+            _ => format!("unknown_reg_{}", reg.get_id()),
+        }
+    }
+
+    fn preg_count() -> usize {
+        REGISTERS_COUNT
     }
 }
 

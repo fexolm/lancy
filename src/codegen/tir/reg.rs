@@ -21,15 +21,13 @@ const REG_CLASS_SIZE_OFFSET: u32 = 28 - REG_CLASS_SIZE_BITS;
 const REG_CLASS_MASK: u32 = ((1 << REG_CLASS_SIZE_BITS) - 1) << REG_CLASS_SIZE_OFFSET;
 const ID_MASK: u32 = (1 << REG_CLASS_SIZE_OFFSET) - 1;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Reg {
     repr: u32,
 }
 
 impl Reg {
-    pub fn new(typ: RegType, cls: RegClass, id: u32) -> Self {
-        debug_assert_eq!(id & ID_MASK, id);
-
+    pub const fn new(typ: RegType, cls: RegClass, id: u32) -> Self {
         Reg {
             repr: id
                 | Self::get_size_mask(cls)
@@ -68,19 +66,17 @@ impl Reg {
         ((self.repr & REG_CLASS_MASK) >> REG_CLASS_SIZE_OFFSET) as u8
     }
 
-    fn get_size_mask(class: RegClass) -> u32 {
+    const fn get_size_mask(class: RegClass) -> u32 {
         let sz = match class {
             RegClass::Int(s) => s,
             RegClass::Float(s) => s,
             RegClass::Vec(s) => s,
         };
 
-        debug_assert_eq!(sz & (sz - 1), 0);
-
         (((sz - 1).count_ones()) as u32) << REG_CLASS_SIZE_OFFSET
     }
 
-    fn get_class_mask(class: RegClass) -> u32 {
+    const fn get_class_mask(class: RegClass) -> u32 {
         match class {
             RegClass::Int(_) => REG_CLASS_INT_BIT,
             RegClass::Float(_) => REG_CLASS_FLOAT_BIT,
@@ -88,7 +84,7 @@ impl Reg {
         }
     }
 
-    fn get_type_mask(typ: RegType) -> u32 {
+    const fn get_type_mask(typ: RegType) -> u32 {
         match typ {
             RegType::Virtual => VIRT_BIT,
             RegType::Physical => 0,

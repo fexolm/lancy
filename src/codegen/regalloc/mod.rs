@@ -1,1 +1,3 @@
-pub struct RegAlloc {}
+mod regalloc;
+
+pub use regalloc::*;

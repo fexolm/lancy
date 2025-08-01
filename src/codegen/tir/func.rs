@@ -1,25 +1,27 @@
 use std::fmt::Display;
 use std::io::empty;
 
-use crate::codegen::tir::{CFG, Reg, RegClass, RegType, reg_name};
+use crate::codegen::tir::{CFG, reg_name};
 use crate::support::slotmap::{Key, PrimaryMap};
 
 use super::{Block, BlockData, Inst, TirError};
 
+pub type Reg = u32;
+
 pub struct Func<I: Inst> {
     name: String,
     blocks: PrimaryMap<Block, BlockData<I>>,
-    vregs_count: u32,
+    regs_count: u32,
     cfg: Option<CFG>,
 }
 
 impl<I: Inst> Func<I> {
     pub fn new(name: String) -> Self {
-        let mut vregs_count = 0;
+        let mut regs_count = I::preg_count() as u32;
 
         Func {
             name,
-            vregs_count,
+            regs_count,
             blocks: PrimaryMap::new(),
             cfg: None,
         }
@@ -44,9 +46,9 @@ impl<I: Inst> Func<I> {
         &self.blocks[block]
     }
 
-    pub fn new_vreg(&mut self, cls: RegClass) -> Reg {
-        let res = Reg::new(RegType::Virtual, cls, self.vregs_count);
-        self.vregs_count += 1;
+    pub fn new_vreg(&mut self) -> Reg {
+        let res = self.regs_count;
+        self.regs_count += 1;
         res
     }
 
@@ -77,8 +79,8 @@ impl<I: Inst> Func<I> {
         self.cfg.as_ref().unwrap()
     }
 
-    pub fn get_vregs_count(&self) -> usize {
-        self.vregs_count as usize
+    pub fn get_regs_count(&self) -> usize {
+        self.regs_count as usize
     }
 
     pub fn get_entry_block(&self) -> Option<Block> {

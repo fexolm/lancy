@@ -1,13 +1,13 @@
 use lancy::codegen::{
     isa::x64::{inst::X64Inst, regs::*},
-    tir::{BlockData, Func, RegClass},
+    tir::Func,
 };
 
 fn main() {
     let mut func = Func::<X64Inst>::new("foo".to_string());
     let b0 = func.add_empty_block();
-    let v0 = func.new_vreg(RegClass::Int(8));
-    let v1 = func.new_vreg(RegClass::Int(8));
+    let v0 = func.new_vreg();
+    let v1 = func.new_vreg();
     let b1 = func.add_empty_block();
     let b2 = func.add_empty_block();
 

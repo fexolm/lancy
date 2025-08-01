@@ -3,7 +3,7 @@ use std::os::raw;
 use smallvec::SmallVec;
 
 use crate::{
-    codegen::tir::{Block, CFG, Func, Inst, Reg, RegType},
+    codegen::tir::{Block, CFG, Func, Inst, Reg},
     support::{
         bitset::FixedBitSet,
         slotmap::{Key, SecondaryMap, SecondaryMapExt},
@@ -18,6 +18,7 @@ pub struct ProgramPoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LiveRange {
+    pub reg: Reg,
     pub start: ProgramPoint,
     pub end: ProgramPoint,
 }
@@ -33,25 +34,13 @@ pub struct LivenessAnalysis {
 
 impl LivenessAnalysis {
     pub fn new<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
-        let vregs_count = func.get_vregs_count() as usize;
-        let live_in = SecondaryMap::new(
-            cfg.blocks_count(),
-            FixedBitSet::zeroes(vregs_count + I::preg_count()),
-        );
-        let live_out = SecondaryMap::new(
-            cfg.blocks_count(),
-            FixedBitSet::zeroes(vregs_count + I::preg_count()),
-        );
-        let uses = SecondaryMap::new(
-            cfg.blocks_count(),
-            FixedBitSet::zeroes(vregs_count + I::preg_count()),
-        );
-        let defs = SecondaryMap::new(
-            cfg.blocks_count(),
-            FixedBitSet::zeroes(vregs_count + I::preg_count()),
-        );
+        let regs_count = func.get_regs_count() as usize;
+        let live_in = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+        let live_out = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+        let uses = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+        let defs = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
 
-        let live_ranges = SecondaryMap::with_default(vregs_count as usize + I::preg_count());
+        let live_ranges = SecondaryMap::with_default(regs_count as usize);
 
         let mut analysis = Self {
             live_in,
@@ -59,7 +48,7 @@ impl LivenessAnalysis {
             uses,
             defs,
             live_ranges,
-            vregs_count,
+            vregs_count: regs_count,
         };
 
         analysis.construct(func, cfg);
@@ -107,22 +96,14 @@ impl LivenessAnalysis {
             let block_uses = &mut self.uses[block];
 
             for r in uses {
-                let id = match r.get_type() {
-                    RegType::Virtual => r.get_id() as usize,
-                    RegType::Physical => r.get_id() as usize + self.vregs_count,
-                    _ => continue, // Spill registers are not tracked
-                };
+                let id = r as usize;
                 if !block_defs.has(id) {
                     block_uses.add(id);
                 }
             }
 
             for r in defs {
-                let id = match r.get_type() {
-                    RegType::Virtual => r.get_id() as usize,
-                    RegType::Physical => r.get_id() as usize + self.vregs_count,
-                    _ => continue, // Spill registers are not tracked
-                };
+                let id = r as usize;
                 block_defs.add(id);
             }
         }
@@ -199,6 +180,7 @@ impl LivenessAnalysis {
                 };
 
                 self.live_ranges[r as u32].push(LiveRange {
+                    reg: r as Reg,
                     start: ProgramPoint {
                         block: block,
                         inst_index: 0,
@@ -217,40 +199,21 @@ impl LivenessAnalysis {
                 };
 
                 for reg in inst.get_uses() {
-                    let id = reg.get_id();
-                    let reg_idx = match reg.get_type() {
-                        RegType::Virtual => reg.get_id() as u32,
-                        RegType::Physical => reg.get_id() + self.vregs_count as u32,
-                        RegType::Spill => {
-                            // Spill registers are not tracked in live ranges
-                            continue;
-                        }
-                    };
-
-                    let last = self.live_ranges[reg_idx].last_mut().unwrap();
+                    let last = self.live_ranges[reg].last_mut().unwrap();
                     if last.end < point {
                         last.end = point;
                     }
                 }
 
                 for reg in inst.get_defs() {
-                    let id = reg.get_id();
-                    let reg_idx = match reg.get_type() {
-                        RegType::Virtual => reg.get_id() as u32,
-                        RegType::Physical => reg.get_id() as u32 + self.vregs_count as u32,
-                        RegType::Spill => {
-                            // Spill registers are not tracked in live ranges
-                            continue;
-                        }
-                    };
-
-                    if let Some(last) = self.live_ranges[reg_idx].last() {
+                    if let Some(last) = self.live_ranges[reg].last() {
                         if last.end >= point {
                             continue; // Already has a range that covers this point
                         }
                     }
 
-                    self.live_ranges[reg_idx].push(LiveRange {
+                    self.live_ranges[reg].push(LiveRange {
+                        reg: reg as Reg,
                         start: point,
                         end: point,
                     });
@@ -269,12 +232,7 @@ impl LivenessAnalysis {
     }
 
     pub fn get_life_ranges(&self, reg: Reg) -> &[LiveRange] {
-        let id = match reg.get_type() {
-            RegType::Virtual => reg.get_id() as u32,
-            RegType::Physical => reg.get_id() as u32 + self.vregs_count as u32,
-            RegType::Spill => return &[],
-        };
-        &self.live_ranges[id]
+        &self.live_ranges[reg]
     }
 }
 
@@ -283,7 +241,7 @@ mod tests {
     use super::*;
     use crate::codegen::{
         isa::x64::{inst::X64Inst, regs::*},
-        tir::{BlockData, Func, Inst, Reg, RegClass},
+        tir::{BlockData, Func, Inst, Reg},
     };
 
     #[test]
@@ -298,7 +256,7 @@ mod tests {
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
-        let v0 = func.new_vreg(RegClass::Int(8));
+        let v0 = func.new_vreg();
 
         let b1 = {
             let mut block_data = BlockData::new();
@@ -325,6 +283,7 @@ mod tests {
         assert_eq!(
             rax_ranges,
             [LiveRange {
+                reg: RAX,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -339,6 +298,7 @@ mod tests {
         assert_eq!(
             v0_ranges,
             [LiveRange {
+                reg: v0,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -366,8 +326,8 @@ mod tests {
 
         let mut func = Func::<X64Inst>::new("foo".to_string());
         let b0 = func.add_empty_block();
-        let v0 = func.new_vreg(RegClass::Int(8));
-        let v1 = func.new_vreg(RegClass::Int(8));
+        let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
         let b1 = func.add_empty_block();
         let b2 = func.add_empty_block();
 
@@ -397,17 +357,18 @@ mod tests {
 
         assert_eq!(
             analysis.live_in[b0].iter_ones().collect::<Vec<_>>(),
-            vec![2]
+            vec![RAX as usize]
         );
 
         assert_eq!(
             analysis.live_out[b2].iter_ones().collect::<Vec<_>>(),
-            vec![2]
+            vec![RAX as usize]
         );
 
         assert_eq!(
             rax_ranges,
             [LiveRange {
+                reg: RAX,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -422,6 +383,7 @@ mod tests {
         assert_eq!(
             v0_ranges,
             [LiveRange {
+                reg: v0,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -436,6 +398,7 @@ mod tests {
         assert_eq!(
             v1_ranges,
             [LiveRange {
+                reg: v1,
                 start: ProgramPoint {
                     block: b1,
                     inst_index: 0,

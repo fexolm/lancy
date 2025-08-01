@@ -157,11 +157,11 @@ impl Inst for X64Inst {
             R13 => "r13".to_string(),
             R14 => "r14".to_string(),
             R15 => "r15".to_string(),
-            _ => format!("unknown_reg_{}", reg.get_id()),
+            _ => unreachable!(),
         }
     }
 
-    fn preg_count() -> usize {
+    fn preg_count() -> u32 {
         REGISTERS_COUNT
     }
 }

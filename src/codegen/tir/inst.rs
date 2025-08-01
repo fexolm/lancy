@@ -20,13 +20,13 @@ pub trait Inst: Sized + Copy + Display {
 
     fn preg_name(reg: Reg) -> String;
 
-    fn preg_count() -> usize;
+    fn preg_count() -> u32;
 }
 
 pub fn reg_name<I: Inst>(reg: Reg) -> String {
-    match reg.get_type() {
-        super::RegType::Virtual => format!("v{}", reg.get_id()),
-        super::RegType::Physical => I::preg_name(reg),
-        super::RegType::Spill => format!("s{}", reg.get_id()),
+    if reg < I::preg_count() {
+        I::preg_name(reg)
+    } else {
+        format!("v{}", reg - I::preg_count())
     }
 }

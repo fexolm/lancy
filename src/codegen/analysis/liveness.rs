@@ -29,12 +29,14 @@ pub struct LivenessAnalysis {
     uses: SecondaryMap<Block, FixedBitSet>,
     defs: SecondaryMap<Block, FixedBitSet>,
     live_ranges: SecondaryMap<u32, Vec<LiveRange>>,
-    vregs_count: usize,
+    regs_count: usize,
+    pregs_count: usize,
 }
 
 impl LivenessAnalysis {
     pub fn new<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
         let regs_count = func.get_regs_count() as usize;
+        let pregs_count = I::preg_count() as usize;
         let live_in = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
         let live_out = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
         let uses = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
@@ -48,7 +50,8 @@ impl LivenessAnalysis {
             uses,
             defs,
             live_ranges,
-            vregs_count: regs_count,
+            regs_count,
+            pregs_count,
         };
 
         analysis.construct(func, cfg);
@@ -231,8 +234,18 @@ impl LivenessAnalysis {
         }
     }
 
-    pub fn get_life_ranges(&self, reg: Reg) -> &[LiveRange] {
+    pub fn get_live_ranges_for(&self, reg: Reg) -> &[LiveRange] {
         &self.live_ranges[reg]
+    }
+
+    pub fn get_vreg_live_ranges(&self) -> Vec<LiveRange> {
+        let mut res = Vec::new();
+        for r in self.pregs_count..self.regs_count {
+            res.extend_from_slice(&self.live_ranges[r as u32]);
+        }
+
+        res.sort_by_key(|r| r.start);
+        res
     }
 }
 
@@ -277,8 +290,8 @@ mod tests {
         func.construct_cfg().unwrap();
         let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
 
-        let v0_ranges = analysis.get_life_ranges(v0);
-        let rax_ranges = analysis.get_life_ranges(RAX);
+        let v0_ranges = analysis.get_live_ranges_for(v0);
+        let rax_ranges = analysis.get_live_ranges_for(RAX);
 
         assert_eq!(
             rax_ranges,
@@ -351,9 +364,9 @@ mod tests {
 
         func.construct_cfg().unwrap();
         let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
-        let v0_ranges = analysis.get_life_ranges(v0);
-        let v1_ranges = analysis.get_life_ranges(v1);
-        let rax_ranges = analysis.get_life_ranges(RAX);
+        let v0_ranges = analysis.get_live_ranges_for(v0);
+        let v1_ranges = analysis.get_live_ranges_for(v1);
+        let rax_ranges = analysis.get_live_ranges_for(RAX);
 
         assert_eq!(
             analysis.live_in[b0].iter_ones().collect::<Vec<_>>(),

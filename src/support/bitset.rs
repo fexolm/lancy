@@ -73,19 +73,6 @@ impl FixedBitSet {
         self.buckets[num_bucket] &= !(1 << bit_pos);
     }
 
-    pub fn set(&mut self, val: bool, index: usize) {
-        let num_bucket = index / Self::bits_in_bucket();
-        if num_bucket + 1 > self.buckets.len() {
-            self.buckets.resize(num_bucket + 1, 0);
-        }
-        let bit_pos = index % (Self::bits_in_bucket());
-        if val {
-            self.buckets[num_bucket] |= 1 << bit_pos;
-        } else {
-            self.buckets[num_bucket] &= !(1 << bit_pos);
-        }
-    }
-
     pub fn has(&self, index: usize) -> bool {
         if index >= self.buckets.len() * 32 {
             return false;
@@ -111,6 +98,14 @@ impl FixedBitSet {
         self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
             (0..Self::bits_in_bucket())
                 .filter(move |j| bucket & (1 << j) != 0)
+                .map(move |j| i * Self::bits_in_bucket() + j)
+        })
+    }
+
+    pub fn iter_zeroes(&self) -> impl Iterator<Item = usize> + '_ {
+        self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
+            (0..Self::bits_in_bucket())
+                .filter(move |j| bucket & (1 << j) == 0)
                 .map(move |j| i * Self::bits_in_bucket() + j)
         })
     }
@@ -158,15 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_true_and_false() {
-        let mut bs = FixedBitSet::zeroes(10);
-        bs.set(true, 5);
-        assert!(bs.has(5));
-        bs.set(false, 5);
-        assert!(!bs.has(5));
-    }
-
-    #[test]
     fn test_union() {
         let mut a = FixedBitSet::zeroes(64);
         let mut b = FixedBitSet::zeroes(64);
@@ -208,14 +194,6 @@ mod tests {
         a.add(10);
         b.add(11);
         assert!(!a.equals(&b));
-    }
-
-    #[test]
-    fn test_set_resize() {
-        let mut bs = FixedBitSet::zeroes(1);
-        bs.set(true, 100);
-        assert!(bs.has(100));
-        assert_eq!(bs.buckets.len(), (100 / 32) + 1);
     }
 
     #[test]

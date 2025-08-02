@@ -3,12 +3,15 @@ use std::collections::{BTreeSet, LinkedList};
 use crate::{
     codegen::{
         analysis::{LiveRange, LivenessAnalysis, ProgramPoint},
-        tir::{CFG, Func, Inst, Reg},
+        tir::{Block, BlockData, CFG, Func, Inst, Reg},
     },
-    support::bitset::FixedBitSet,
+    support::{
+        bitset::FixedBitSet,
+        slotmap::{Key, SecondaryMap, SecondaryMapExt},
+    },
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum AllocatedSlot {
     Reg(Reg),
     Stack(u32),
@@ -44,6 +47,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
     fn expire(&mut self, p: ProgramPoint) {
         while let Some((end, reg)) = self.expire_range.first() {
             if *end < p {
+                self.active.del(*reg as usize);
                 self.expire_range.pop_first();
             } else {
                 return;
@@ -89,6 +93,59 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
         }
 
         res
+    }
+}
+
+pub fn apply_regalloc_result<I: Inst>(func: &mut Func<I>, mut ra_intervals: Vec<RegAllocResult>) {
+    let mut slots = Vec::new();
+    let mut new_blocks = SecondaryMap::with_default(func.blocks_count());
+    slots.resize(func.get_regs_count() - I::preg_count() as usize, None);
+
+    ra_intervals.sort_by_key(|i| i.range.start);
+    ra_intervals.reverse();
+
+    for (block, data) in func.blocks_iter() {
+        let mut new_block = BlockData::new();
+        for (idx, &i) in data.iter().enumerate() {
+            let p = ProgramPoint {
+                block: block,
+                inst_index: idx as u32,
+            };
+
+            while let Some(interval) = ra_intervals.last() {
+                if interval.range.start <= p && interval.range.end >= p {
+                    slots[interval.range.reg as usize - I::preg_count() as usize] =
+                        Some(interval.allocated_slot);
+                    ra_intervals.pop();
+                } else {
+                    break;
+                }
+            }
+
+            let mut new_inst = i;
+            let defs = i.get_defs();
+            let uses = i.get_uses();
+            for &old in defs.iter().chain(uses.iter()) {
+                if old >= I::preg_count() {
+                    if let Some(AllocatedSlot::Reg(new)) =
+                        slots[old as usize - I::preg_count() as usize]
+                    {
+                        new_inst = new_inst.replace(old, new)
+                    } else {
+                        todo!();
+                    }
+                }
+            }
+
+            new_block.push(new_inst);
+        }
+        new_blocks[block] = new_block;
+    }
+
+    let blocks_count = func.blocks_count();
+    for b in 0..blocks_count {
+        let b = Block::new(b);
+        *func.get_block_data_mut(b) = new_blocks[b].clone();
     }
 }
 

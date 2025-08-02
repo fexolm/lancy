@@ -94,6 +94,10 @@ impl<I: Inst> Func<I> {
     pub fn blocks_iter(&self) -> impl Iterator<Item = (Block, &BlockData<I>)> {
         self.blocks.iter()
     }
+
+    pub fn blocks_count(&self) -> usize {
+        self.blocks.len()
+    }
 }
 
 impl<I: Inst> Display for Func<I> {

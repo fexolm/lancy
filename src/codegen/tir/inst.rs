@@ -21,6 +21,8 @@ pub trait Inst: Sized + Copy + Display {
     fn preg_name(reg: Reg) -> String;
 
     fn preg_count() -> u32;
+
+    fn replace(&self, old: Reg, new: Reg) -> Self;
 }
 
 pub fn reg_name<I: Inst>(reg: Reg) -> String {

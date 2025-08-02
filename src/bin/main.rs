@@ -1,5 +1,7 @@
 use lancy::codegen::{
+    analysis::LivenessAnalysis,
     isa::x64::{inst::X64Inst, regs::*},
+    regalloc::{RegAlloc, apply_regalloc_result},
     tir::Func,
 };
 
@@ -30,6 +32,13 @@ fn main() {
     }
 
     func.construct_cfg().unwrap();
+
+    println!("{func}");
+
+    let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
+    let mut regalloc = RegAlloc::new(&func, &func.get_cfg(), &analysis);
+    let regalloc_intervals = regalloc.run();
+    apply_regalloc_result(&mut func, regalloc_intervals);
 
     println!("{func}");
 }

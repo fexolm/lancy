@@ -17,8 +17,17 @@ impl Debug for Block {
     }
 }
 
+#[derive(Clone)]
 pub struct BlockData<I: Inst> {
     insts: Vec<I>,
+}
+
+impl<I: Inst> Default for BlockData<I> {
+    fn default() -> Self {
+        Self {
+            insts: Default::default(),
+        }
+    }
 }
 
 impl<I: Inst> BlockData<I> {
@@ -55,13 +64,5 @@ impl<I: Inst> Display for BlockData<I> {
             write!(f, "    {inst}\n")?;
         }
         Ok(())
-    }
-}
-
-impl<I: Inst> Default for BlockData<I> {
-    fn default() -> Self {
-        Self {
-            insts: Default::default(),
-        }
     }
 }

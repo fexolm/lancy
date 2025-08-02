@@ -161,6 +161,55 @@ impl Inst for X64Inst {
         }
     }
 
+    fn replace(&self, old: Reg, new: Reg) -> Self {
+        fn replace_reg(cur: Reg, old: Reg, new: Reg) -> Reg {
+            if old == cur { new } else { cur }
+        }
+
+        fn replace_mem(mem: Mem, old: Reg, new: Reg) -> Mem {
+            Mem {
+                reg: replace_reg(mem.reg, old, new),
+                index: if let Some(idx) = mem.index {
+                    Some(replace_reg(idx, old, new))
+                } else {
+                    None
+                },
+                scale: mem.scale,
+                disp: mem.disp,
+            }
+        }
+
+        match *self {
+            X64Inst::Ret => *self,
+            X64Inst::Jmp { .. } => *self,
+            X64Inst::CondJmp { .. } => *self,
+            X64Inst::Mov64rm { dst, src } => X64Inst::Mov64rm {
+                dst: replace_reg(dst, old, new),
+                src: replace_mem(src, old, new),
+            },
+            X64Inst::Mov64mr { dst, src } => X64Inst::Mov64mr {
+                dst: replace_mem(dst, old, new),
+                src: replace_reg(src, old, new),
+            },
+            X64Inst::Mov64rr { dst, src } => X64Inst::Mov64rr {
+                dst: replace_reg(dst, old, new),
+                src: replace_reg(src, old, new),
+            },
+            X64Inst::Mov64ri64 { dst, src } => X64Inst::Mov64ri64 {
+                dst: replace_reg(dst, old, new),
+                src,
+            },
+            X64Inst::Mov64mi64 { dst, src } => X64Inst::Mov64mi64 {
+                dst: replace_mem(dst, old, new),
+                src,
+            },
+            X64Inst::CMP64rr { lhs, rhs } => X64Inst::CMP64rr {
+                lhs: replace_reg(lhs, old, new),
+                rhs: replace_reg(rhs, old, new),
+            },
+        }
+    }
+
     fn preg_count() -> u32 {
         REGISTERS_COUNT
     }

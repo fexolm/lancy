@@ -1,9 +1,7 @@
+use crate::codegen::tir::reverse_post_order;
 use crate::{
-    codegen::tir::{Block, CFG, Func, Inst},
-    support::{
-        bitset::FixedBitSet,
-        slotmap::{Key, SecondaryMap, SecondaryMapExt},
-    },
+    codegen::tir::{Block, Inst, CFG},
+    support::slotmap::{Key, SecondaryMap, SecondaryMapExt},
 };
 
 #[derive(Clone, Default)]
@@ -14,49 +12,21 @@ struct Node {
 
 pub struct DomTree {
     nodes: SecondaryMap<Block, Node>,
-    reverse_postorder: Vec<Block>,
 }
 
 impl DomTree {
-    pub fn build(cfg: &CFG) -> Self {
+    pub fn compute(cfg: &CFG) -> Self {
         let mut res = Self {
             nodes: SecondaryMap::with_default(cfg.blocks_count()),
-            reverse_postorder: Vec::new(),
         };
-        res.compute(cfg);
+        res.compute_domtree(cfg);
         res
     }
 
-    fn compute(&mut self, cfg: &CFG) {
-        self.compute_postorder(cfg);
-        self.compute_domtree(cfg);
-    }
-
-    fn compute_postorder(&mut self, cfg: &CFG) {
-        let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
-
-        let mut stack = Vec::new();
-        let entry = cfg.get_entry_block();
-        stack.push(entry);
-
-        while let Some(block) = stack.pop() {
-            if visited.has(block.index()) {
-                continue;
-            }
-            visited.add(block.index());
-            self.reverse_postorder.push(block);
-
-            for &succ in cfg.succs(block) {
-                if !visited.has(succ.index()) {
-                    stack.push(succ);
-                }
-            }
-        }
-    }
-
     fn compute_domtree(&mut self, cfg: &CFG) {
+        let rpo = reverse_post_order(cfg);
         const STRIDE: u32 = 4;
-        let (entry_block, reverse_postorder) = match self.reverse_postorder.as_slice().split_first()
+        let (entry_block, reverse_postorder) = match rpo.as_slice().split_first()
         {
             Some((&eb, rest)) => (eb, rest),
             None => return,
@@ -181,7 +151,7 @@ mod tests {
     #[test]
     fn test_simple_cfg_domtree() {
         let cfg = simple_cfg();
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         let b0 = Block::new(0);
         let b1 = Block::new(1);
@@ -200,7 +170,7 @@ mod tests {
     #[test]
     fn test_diamond_cfg_domtree() {
         let cfg = diamond_cfg();
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         let b0 = Block::new(0);
         let b1 = Block::new(1);
@@ -219,7 +189,7 @@ mod tests {
     #[test]
     fn test_self_dominance() {
         let cfg = simple_cfg();
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         for i in 0..4 {
             let b = Block::new(i);
@@ -234,7 +204,7 @@ mod tests {
         for i in 0..4 {
             cfg.add_edge(Block::new(i + 1), Block::new(i));
         }
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         for i in 0..5 {
             for j in i..5 {
@@ -259,7 +229,7 @@ mod tests {
         cfg.add_edge(Block::new(3), Block::new(2));
         cfg.add_edge(Block::new(1), Block::new(3)); // back edge
 
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         // 0 dominates all
         for i in 1..4 {
@@ -290,7 +260,7 @@ mod tests {
         cfg.add_edge(Block::new(1), Block::new(4)); // back edge (outer loop)
         cfg.add_edge(Block::new(2), Block::new(3)); // back edge (inner loop)
 
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         // 0 dominates all
         for i in 1..6 {
@@ -311,9 +281,9 @@ mod tests {
         // 4 dominates 5
         assert!(domtree.dominates(Block::new(4), Block::new(5)));
 
-        // 3 does not dominates 2 (inner loop back edge)
+        // 3 does not dominate 2 (inner loop back edge)
         assert!(!domtree.dominates(Block::new(3), Block::new(2)));
-        // 4 does not dominates 1 (outer loop back edge)
+        // 4 does not dominate 1 (outer loop back edge)
         assert!(!domtree.dominates(Block::new(4), Block::new(1)));
     }
 
@@ -332,7 +302,7 @@ mod tests {
         cfg.add_edge(Block::new(1), Block::new(3)); // back edge (outer loop)
         cfg.add_edge(Block::new(3), Block::new(4)); // forward edge
 
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         // 0 dominates all
         for i in 1..5 {
@@ -370,7 +340,7 @@ mod tests {
         cfg.add_edge(Block::new(7), Block::new(18));
         cfg.add_edge(Block::new(1), Block::new(9));
 
-        let domtree = DomTree::build(&cfg);
+        let domtree = DomTree::compute(&cfg);
 
         // Check some dominance relations
         assert!(domtree.dominates(Block::new(0), Block::new(5)));
@@ -384,3 +354,5 @@ mod tests {
         assert!(!domtree.dominates(Block::new(10), Block::new(1)));
     }
 }
+
+

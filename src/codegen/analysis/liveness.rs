@@ -1,14 +1,13 @@
-use std::os::raw;
-
 use smallvec::SmallVec;
 
 use crate::{
-    codegen::tir::{Block, CFG, Func, Inst, Reg},
+    codegen::tir::{Block, Func, Inst, Reg, CFG},
     support::{
         bitset::FixedBitSet,
         slotmap::{Key, SecondaryMap, SecondaryMapExt},
     },
 };
+use crate::codegen::tir::reverse_post_order;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProgramPoint {
@@ -26,71 +25,31 @@ pub struct LiveRange {
 pub struct LivenessAnalysis {
     live_in: SecondaryMap<Block, FixedBitSet>,
     live_out: SecondaryMap<Block, FixedBitSet>,
-    uses: SecondaryMap<Block, FixedBitSet>,
-    defs: SecondaryMap<Block, FixedBitSet>,
     live_ranges: SecondaryMap<u32, Vec<LiveRange>>,
     regs_count: usize,
     pregs_count: usize,
 }
 
-impl LivenessAnalysis {
-    pub fn new<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
-        let regs_count = func.get_regs_count() as usize;
-        let pregs_count = I::preg_count() as usize;
-        let live_in = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
-        let live_out = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
-        let uses = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
-        let defs = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+struct UseDefs {
+    uses: SecondaryMap<Block, FixedBitSet>,
+    defs: SecondaryMap<Block, FixedBitSet>,
+}
 
-        let live_ranges = SecondaryMap::with_default(regs_count as usize);
-
-        let mut analysis = Self {
-            live_in,
-            live_out,
-            uses,
-            defs,
-            live_ranges,
-            regs_count,
-            pregs_count,
+impl UseDefs {
+    pub fn compute<I: Inst>(func: &Func<I>) -> Self {
+        let mut res = Self {
+            uses: SecondaryMap::new(func.blocks_count(), FixedBitSet::zeroes(func.get_regs_count())),
+            defs: SecondaryMap::new(func.blocks_count(), FixedBitSet::zeroes(func.get_regs_count())),
         };
 
-        analysis.construct(func, cfg);
-        analysis.compute_live_ranges(func, cfg);
-
-        analysis
-    }
-
-    fn compute_reverse_postorder<I: Inst>(
-        func: &Func<I>,
-        cfg: &CFG,
-    ) -> smallvec::SmallVec<[Block; 16]> {
-        let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
-
-        let mut stack = Vec::new();
-        let entry = func.get_entry_block().unwrap();
-        stack.push(entry);
-
-        let mut postorder = SmallVec::new();
-        postorder.reserve(cfg.blocks_count());
-
-        while let Some(block) = stack.pop() {
-            if visited.has(block.index()) {
-                continue;
-            }
-            visited.add(block.index());
-
-            postorder.push(block);
-
-            for &succ in cfg.succs(block) {
-                if !visited.has(succ.index()) {
-                    stack.push(succ);
-                }
-            }
+        for (b, _) in func.blocks_iter() {
+            res.compute_block(b, func);
         }
-        postorder
+
+        res
     }
 
-    fn init_block<I: Inst>(&mut self, block: Block, func: &Func<I>, cfg: &CFG) {
+    fn compute_block<I: Inst>(&mut self, block: Block, func: &Func<I>) {
         for inst in func.get_block_data(block).iter() {
             let uses = inst.get_uses();
             let defs = inst.get_defs();
@@ -112,13 +71,43 @@ impl LivenessAnalysis {
         }
     }
 
-    fn construct<I: Inst>(&mut self, func: &Func<I>, cfg: &CFG) {
-        let mut worklist = Self::compute_reverse_postorder(&func, cfg);
+    pub fn get_uses(&self, block: Block) -> &FixedBitSet {
+        &self.uses[block]
+    }
+
+    pub fn get_defs(&self, block: Block) -> &FixedBitSet {
+        &self.defs[block]
+    }
+}
+
+impl LivenessAnalysis {
+    pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
+        let regs_count = func.get_regs_count() as usize;
+        let pregs_count = I::preg_count() as usize;
+        let live_in = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+        let live_out = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
+
+        let live_ranges = SecondaryMap::with_default(regs_count as usize);
+
+        let mut analysis = Self {
+            live_in,
+            live_out,
+            live_ranges,
+            regs_count,
+            pregs_count,
+        };
+        
+        analysis.do_compute(func, cfg);
+        analysis.compute_live_ranges(func, cfg);
+
+        analysis
+    }
+
+    fn do_compute<I: Inst>(&mut self, func: &Func<I>, cfg: &CFG) {
+        let mut worklist = reverse_post_order(cfg);
         let mut changed = true;
 
-        for (b, _) in func.blocks_iter() {
-            self.init_block(b, func, cfg);
-        }
+        let usedefs = UseDefs::compute(func);
 
         while let Some(block) = worklist.pop() {
             let line_ins_count = self.live_in[block].ones_count();
@@ -129,8 +118,8 @@ impl LivenessAnalysis {
             }
 
             self.live_in[block].union(&self.live_out[block]);
-            self.live_in[block].difference(&self.defs[block]);
-            self.live_in[block].union(&self.uses[block]);
+            self.live_in[block].difference(&usedefs.get_defs(block));
+            self.live_in[block].union(&usedefs.get_uses(block));
 
             if self.live_in[block].ones_count() != line_ins_count
                 || self.live_out[block].ones_count() != line_outs_count
@@ -158,7 +147,7 @@ impl LivenessAnalysis {
 
                 if next.start <= current.end
                     || block_data.len() as u32 >= current.end.inst_index
-                        && next.start.inst_index == 0
+                    && next.start.inst_index == 0
                 {
                     current.end = next.end;
                 } else {
@@ -254,8 +243,61 @@ mod tests {
     use super::*;
     use crate::codegen::{
         isa::x64::{inst::X64Inst, regs::*},
-        tir::{BlockData, Func, Inst, Reg},
+        tir::{BlockData, Func},
     };
+
+    
+    #[test]
+    fn usedef_test() {
+        // foo:
+        // @0
+        //     mov v0 rax
+        //     jmp @1
+        // @1
+        //     mov rax v0
+        //     ret
+        let mut func = Func::<X64Inst>::new("foo".to_string());
+
+        let b0 = func.add_empty_block();
+        let v0 = func.new_vreg();
+
+        let b1 = {
+            let mut block_data = BlockData::new();
+
+            block_data.push(X64Inst::Mov64rr { dst: RAX, src: v0 });
+            block_data.push(X64Inst::Ret);
+
+            func.add_block(block_data)
+        };
+
+        {
+            let block_data = func.get_block_data_mut(b0);
+            block_data.push(X64Inst::Mov64rr { dst: v0, src: RAX });
+
+            block_data.push(X64Inst::Jmp { dst: b1 });
+        }
+
+        let usedefs = UseDefs::compute(&func);
+
+        assert_eq!(
+            usedefs.get_uses(b0).iter_ones().collect::<Vec<_>>(),
+            vec![RAX as usize]
+        );
+        assert_eq!(
+            usedefs.get_defs(b0).iter_ones().collect::<Vec<_>>(),
+            vec![v0 as usize]
+        );
+
+        assert_eq!(
+            usedefs.get_uses(b1).iter_ones().collect::<Vec<_>>(),
+            vec![v0 as usize]
+        );
+        assert_eq!(
+            usedefs.get_defs(b1).iter_ones().collect::<Vec<_>>(),
+            vec![RAX as usize]
+        );
+    }
+
 
     #[test]
     fn simple_test() {
@@ -287,8 +329,8 @@ mod tests {
             block_data.push(X64Inst::Jmp { dst: b1 });
         }
 
-        func.construct_cfg().unwrap();
-        let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
+        let cfg = CFG::compute(&func).unwrap();
+        let analysis = LivenessAnalysis::compute(&func, &cfg);
 
         let v0_ranges = analysis.get_live_ranges_for(v0);
         let rax_ranges = analysis.get_live_ranges_for(RAX);
@@ -362,8 +404,8 @@ mod tests {
             block_data.push(X64Inst::Jmp { dst: b0 });
         }
 
-        func.construct_cfg().unwrap();
-        let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
+        let cfg = CFG::compute(&func).unwrap();
+        let analysis = LivenessAnalysis::compute(&func, &cfg);
         let v0_ranges = analysis.get_live_ranges_for(v0);
         let v1_ranges = analysis.get_live_ranges_for(v1);
         let rax_ranges = analysis.get_live_ranges_for(RAX);

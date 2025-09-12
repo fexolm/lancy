@@ -1,7 +1,8 @@
+use lancy::codegen::tir::CFG;
 use lancy::codegen::{
     analysis::LivenessAnalysis,
     isa::x64::{inst::X64Inst, regs::*},
-    regalloc::{RegAlloc, apply_regalloc_result},
+    regalloc::{apply_regalloc_result, RegAlloc},
     tir::Func,
 };
 
@@ -31,12 +32,12 @@ fn main() {
         block_data.push(X64Inst::Jmp { dst: b0 });
     }
 
-    func.construct_cfg().unwrap();
+    let cfg = CFG::compute(&func).unwrap();
 
     println!("{func}");
 
-    let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
-    let mut regalloc = RegAlloc::new(&func, &func.get_cfg(), &analysis);
+    let analysis = LivenessAnalysis::compute(&func, &cfg);
+    let mut regalloc = RegAlloc::new(&func, &cfg, &analysis);
     let regalloc_intervals = regalloc.run();
     apply_regalloc_result(&mut func, regalloc_intervals);
 

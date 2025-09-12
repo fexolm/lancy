@@ -1,9 +1,9 @@
-use std::collections::{BTreeSet, LinkedList};
+use std::collections::BTreeSet;
 
 use crate::{
     codegen::{
         analysis::{LiveRange, LivenessAnalysis, ProgramPoint},
-        tir::{Block, BlockData, CFG, Func, Inst, Reg},
+        tir::{Block, BlockData, Func, Inst, Reg, CFG},
     },
     support::{
         bitset::FixedBitSet,
@@ -151,6 +151,7 @@ pub fn apply_regalloc_result<I: Inst>(func: &mut Func<I>, mut ra_intervals: Vec<
 
 #[cfg(test)]
 mod tests {
+    use crate::codegen::tir::CFG;
     use crate::codegen::{
         analysis::{LiveRange, LivenessAnalysis, ProgramPoint},
         isa::x64::{
@@ -191,10 +192,10 @@ mod tests {
             block_data.push(X64Inst::Jmp { dst: b1 });
         }
 
-        func.construct_cfg().unwrap();
-        let analysis = LivenessAnalysis::new(&func, &func.get_cfg());
+        let cfg = CFG::compute(&func).unwrap();
+        let analysis = LivenessAnalysis::compute(&func, &cfg);
 
-        let mut regalloc = RegAlloc::new(&func, &func.get_cfg(), &analysis);
+        let mut regalloc = RegAlloc::new(&func, &cfg, &analysis);
 
         assert_eq!(
             regalloc.run(),

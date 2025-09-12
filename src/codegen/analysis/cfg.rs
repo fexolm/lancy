@@ -1,7 +1,8 @@
 use smallvec::SmallVec;
 
-use crate::codegen::tir::Block;
-use crate::support::slotmap::{SecondaryMap, SecondaryMapExt};
+use crate::codegen::tir::{Block, Func, Inst, TirError};
+use crate::support::bitset::FixedBitSet;
+use crate::support::slotmap::{Key, SecondaryMap, SecondaryMapExt};
 
 #[derive(Default, Clone)]
 struct CFGNode {
@@ -20,6 +21,27 @@ impl CFG {
             nodes: SecondaryMap::with_default(size),
             entry,
         }
+    }
+    pub fn compute<I: Inst>(func: &Func<I>) -> Result<CFG, TirError> {
+        let size = func.blocks_count();
+        let entry = func.get_entry_block().ok_or(TirError::EmptyFunctionBody)?;
+
+        let mut cfg = Self::new(entry, size);
+
+        for (block, data) in func.blocks_iter() {
+            if let Some(term) = data.get_terminator() {
+                if term.is_branch() {
+                    let targets = term.get_branch_targets();
+                    for t in targets {
+                        cfg.add_edge(t, block);
+                    }
+                }
+            } else {
+                return Err(TirError::BlockNotTerminated(block));
+            }
+        }
+
+        Ok(cfg)
     }
 
     pub fn add_edge(&mut self, successor: Block, predecessor: Block) {
@@ -43,6 +65,34 @@ impl CFG {
         self.entry
     }
 }
+
+pub fn reverse_post_order(cfg: &CFG) -> Vec<Block> {
+    let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
+
+    let mut stack = Vec::new();
+    let entry = cfg.get_entry_block();
+    stack.push(entry);
+
+    let mut rpo = Vec::new();
+    rpo.reserve(cfg.blocks_count());
+
+    while let Some(block) = stack.pop() {
+        if visited.has(block.index()) {
+            continue;
+        }
+        visited.add(block.index());
+
+        rpo.push(block);
+
+        for &succ in cfg.succs(block) {
+            if !visited.has(succ.index()) {
+                stack.push(succ);
+            }
+        }
+    }
+    rpo
+}
+
 #[cfg(test)]
 mod tests {
     use crate::support::slotmap::Key;

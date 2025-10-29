@@ -47,7 +47,9 @@ impl Mem {
 
 #[derive(Clone, Copy)]
 pub enum X64Inst {
-    Ret,
+    Ret {
+        src: Reg
+    },
     Jmp {
         dst: Block,
     },
@@ -85,7 +87,7 @@ pub enum X64Inst {
 impl Inst for X64Inst {
     fn is_ret(&self) -> bool {
         match self {
-            X64Inst::Ret => true,
+            X64Inst::Ret{..} => true,
             _ => false,
         }
     }
@@ -100,7 +102,7 @@ impl Inst for X64Inst {
 
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
         match self {
-            X64Inst::Ret => smallvec![],
+            X64Inst::Ret{src} => smallvec![*src],
             X64Inst::Jmp { .. } => smallvec![],
             X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Mov64rm { dst, src } => src.get_uses(),
@@ -117,7 +119,7 @@ impl Inst for X64Inst {
     }
     fn get_defs(&self) -> SmallVec<[Reg; 1]> {
         match self {
-            X64Inst::Ret => smallvec![],
+            X64Inst::Ret{..} => smallvec![],
             X64Inst::Jmp { .. } => smallvec![],
             X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Mov64rm { dst, src } => smallvec![*dst],
@@ -180,7 +182,7 @@ impl Inst for X64Inst {
         }
 
         match *self {
-            X64Inst::Ret => *self,
+            X64Inst::Ret{..} => *self,
             X64Inst::Jmp { .. } => *self,
             X64Inst::CondJmp { .. } => *self,
             X64Inst::Mov64rm { dst, src } => X64Inst::Mov64rm {
@@ -222,7 +224,7 @@ fn reg_name(reg: Reg) -> String {
 impl Display for X64Inst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            X64Inst::Ret => write!(f, "ret"),
+            X64Inst::Ret{src} => write!(f, "ret {}", reg_name(*src)),
             X64Inst::Jmp { dst } => write!(f, "jmp {dst}"),
             X64Inst::CondJmp {
                 cond,

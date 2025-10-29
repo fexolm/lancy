@@ -6,7 +6,7 @@ use std::{
 
 use smallvec::SmallVec;
 
-type Word = u32;
+type Word = u64;
 
 #[derive(Clone)]
 pub struct FixedBitSet {
@@ -27,7 +27,7 @@ impl FixedBitSet {
     }
 
     pub fn ones(size: usize) -> Self {
-        Self::new(size, u32::MAX)
+        Self::new(size, Word::MAX)
     }
 
     fn bits_in_bucket() -> usize {
@@ -50,6 +50,16 @@ impl FixedBitSet {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             *bucket |= other.buckets[i];
         }
+    }
+    
+    pub fn is_superset_of(&self, other: &FixedBitSet) -> bool {
+        debug_assert_eq!(self.buckets.len(), other.buckets.len());
+        for (i, &bucket) in self.buckets.iter().enumerate() {
+            if (bucket & other.buckets[i]) == other.buckets[i] {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn difference(&mut self, other: &FixedBitSet) {
@@ -97,7 +107,7 @@ impl FixedBitSet {
     pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
         self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
             (0..Self::bits_in_bucket())
-                .filter(move |j| bucket & (1 << j) != 0)
+                .filter(move |j| bucket & ((1 as Word) << j) != 0)
                 .map(move |j| i * Self::bits_in_bucket() + j)
         })
     }
@@ -105,7 +115,7 @@ impl FixedBitSet {
     pub fn iter_zeroes(&self) -> impl Iterator<Item = usize> + '_ {
         self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
             (0..Self::bits_in_bucket())
-                .filter(move |j| bucket & (1 << j) == 0)
+                .filter(move |j| bucket & ((1 as Word) << j) == 0)
                 .map(move |j| i * Self::bits_in_bucket() + j)
         })
     }

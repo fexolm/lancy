@@ -1,46 +1,49 @@
-use smallvec::SmallVec;
-
+use crate::codegen::tir::reverse_post_order;
 use crate::{
     codegen::tir::{Block, Func, Inst, Reg, CFG},
     support::{
         bitset::FixedBitSet,
-        slotmap::{Key, SecondaryMap, SecondaryMapExt},
+        slotmap::{Key, SecondaryMap},
     },
 };
-use crate::codegen::tir::reverse_post_order;
+use std::ops::Index;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ProgramPoint {
     pub block: Block,
     pub inst_index: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct LiveRange {
-    pub reg: Reg,
     pub start: ProgramPoint,
     pub end: ProgramPoint,
 }
 
-pub struct LivenessAnalysis {
-    live_in: SecondaryMap<Block, FixedBitSet>,
-    live_out: SecondaryMap<Block, FixedBitSet>,
-    live_ranges: SecondaryMap<u32, Vec<LiveRange>>,
-    regs_count: usize,
-    pregs_count: usize,
-}
 
 struct UseDefs {
     uses: SecondaryMap<Block, FixedBitSet>,
     defs: SecondaryMap<Block, FixedBitSet>,
 }
+struct LivenessAnalysis {
+    live_in: SecondaryMap<Block, FixedBitSet>,
+    live_out: SecondaryMap<Block, FixedBitSet>,
+}
+
+#[derive(Default)]
+pub struct LiveRanges {
+    ranges: SecondaryMap<Reg, Vec<LiveRange>>,
+}
+
 
 impl UseDefs {
     pub fn compute<I: Inst>(func: &Func<I>) -> Self {
-        let mut res = Self {
-            uses: SecondaryMap::new(func.blocks_count(), FixedBitSet::zeroes(func.get_regs_count())),
-            defs: SecondaryMap::new(func.blocks_count(), FixedBitSet::zeroes(func.get_regs_count())),
-        };
+        let mut uses = SecondaryMap::new(func.blocks_count());
+        uses.fill(FixedBitSet::zeroes(func.get_regs_count()));
+        let mut defs = SecondaryMap::new(func.blocks_count());
+        defs.fill(FixedBitSet::zeroes(func.get_regs_count()));
+
+        let mut res = Self { uses, defs };
 
         for (b, _) in func.blocks_iter() {
             res.compute_block(b, func);
@@ -54,8 +57,8 @@ impl UseDefs {
             let uses = inst.get_uses();
             let defs = inst.get_defs();
 
-            let block_defs = &mut self.defs[block];
-            let block_uses = &mut self.uses[block];
+            let block_defs = &mut self.defs.get_mut(block).unwrap();
+            let block_uses = &mut self.uses.get_mut(block).unwrap();
 
             for r in uses {
                 let id = r as usize;
@@ -84,22 +87,17 @@ impl LivenessAnalysis {
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
         let regs_count = func.get_regs_count() as usize;
         let pregs_count = I::preg_count() as usize;
-        let live_in = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
-        let live_out = SecondaryMap::new(cfg.blocks_count(), FixedBitSet::zeroes(regs_count));
-
-        let live_ranges = SecondaryMap::with_default(regs_count as usize);
+        let mut live_in = SecondaryMap::new(cfg.blocks_count());
+        live_in.fill(FixedBitSet::zeroes(regs_count));
+        let mut live_out = SecondaryMap::new(cfg.blocks_count());
+        live_out.fill(FixedBitSet::zeroes(regs_count));
 
         let mut analysis = Self {
             live_in,
             live_out,
-            live_ranges,
-            regs_count,
-            pregs_count,
         };
-        
-        analysis.do_compute(func, cfg);
-        analysis.compute_live_ranges(func, cfg);
 
+        analysis.do_compute(func, cfg);
         analysis
     }
 
@@ -113,13 +111,17 @@ impl LivenessAnalysis {
             let line_ins_count = self.live_in[block].ones_count();
             let line_outs_count = self.live_out[block].ones_count();
 
+            let mut live_out = self.live_out.get_mut(block).unwrap();
+
             for &s in cfg.succs(block) {
-                self.live_out[block].union(&self.live_in[s]);
+                live_out.union(&self.live_in[s]);
             }
 
-            self.live_in[block].union(&self.live_out[block]);
-            self.live_in[block].difference(&usedefs.get_defs(block));
-            self.live_in[block].union(&usedefs.get_uses(block));
+            let mut live_in = self.live_in.get_mut(block).unwrap();
+
+            live_in.union(&self.live_out[block]);
+            live_in.difference(&usedefs.get_defs(block));
+            live_in.union(&usedefs.get_uses(block));
 
             if self.live_in[block].ones_count() != line_ins_count
                 || self.live_out[block].ones_count() != line_outs_count
@@ -128,113 +130,81 @@ impl LivenessAnalysis {
             }
         }
     }
+}
 
-    fn merge_intervals(&mut self, func: &Func<impl Inst>) {
-        for i in 0..self.live_ranges.capacity() {
-            let mut ranges = &mut self.live_ranges[i as u32];
+impl LiveRanges {
+    pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
+        let entry = if let Some(entry) = func.get_entry_block() {
+            entry
+        } else {
+            return Self::default();
+        };
 
-            if ranges.is_empty() {
-                continue;
-            }
+        let liveness = LivenessAnalysis::compute(func, cfg);
 
-            ranges.sort();
+        let mut ranges: SecondaryMap<Reg, Vec<LiveRange>> = SecondaryMap::new(func.get_regs_count());
 
-            let mut merged = Vec::new();
-            let mut current = ranges[0];
+        let mut live_vars = liveness.live_in[entry].clone();
 
-            for &next in &ranges[1..] {
-                let block_data = func.get_block_data(current.end.block);
-
-                if next.start <= current.end
-                    || block_data.len() as u32 >= current.end.inst_index
-                    && next.start.inst_index == 0
-                {
-                    current.end = next.end;
-                } else {
-                    merged.push(current);
-                    current = next;
-                }
-            }
-            merged.push(current);
-            *ranges = merged;
+        for r in live_vars.iter_ones() {
+            ranges[r as Reg].push(LiveRange {
+                start: ProgramPoint {
+                    block: entry,
+                    inst_index: 0,
+                },
+                end: ProgramPoint {
+                    block: entry,
+                    inst_index: 0,
+                },
+            });
         }
-    }
-
-    fn compute_live_ranges<I: Inst>(&mut self, func: &Func<I>, cfg: &CFG) {
-        let mut prev_block_len = 0;
 
         for (block, block_data) in func.blocks_iter() {
-            for r in self.live_in[block].iter_ones() {
-                let end = if self.live_out[block].has(r as usize) {
-                    block_data.len() as u32
-                } else {
-                    0
-                };
+            let live_in = &liveness.live_in[block];
+            let live_out = &liveness.live_out[block];
 
-                self.live_ranges[r as u32].push(LiveRange {
-                    reg: r as Reg,
-                    start: ProgramPoint {
-                        block: block,
-                        inst_index: 0,
-                    },
-                    end: ProgramPoint {
-                        block: block,
-                        inst_index: end,
-                    },
-                });
-            }
+            live_vars.union(live_in);
 
-            for (inst_index, inst) in block_data.iter().enumerate() {
-                let point = ProgramPoint {
+            for (idx, inst) in block_data.iter().enumerate() {
+                let p = ProgramPoint {
                     block,
-                    inst_index: inst_index as u32,
+                    inst_index: idx as u32,
                 };
 
-                for reg in inst.get_uses() {
-                    let last = self.live_ranges[reg].last_mut().unwrap();
-                    if last.end < point {
-                        last.end = point;
-                    }
+                for r in inst.get_uses() {
+                    ranges[r].last_mut().unwrap().end = p;
                 }
 
-                for reg in inst.get_defs() {
-                    if let Some(last) = self.live_ranges[reg].last() {
-                        if last.end >= point {
-                            continue; // Already has a range that covers this point
-                        }
+                for r in inst.get_defs() {
+                    if live_vars.has(r as usize) && live_out.has(r as usize) {
+                        continue;
                     }
 
-                    self.live_ranges[reg].push(LiveRange {
-                        reg: reg as Reg,
-                        start: point,
-                        end: point,
+                    ranges[r].push(LiveRange {
+                        start: p,
+                        end: p,
                     });
                 }
             }
-
-            for r in self.live_out[block].iter_ones() {
-                self.live_ranges[r as u32].last_mut().unwrap().end = ProgramPoint {
-                    block: block,
+            for r in live_out.iter_ones() {
+                ranges[r as Reg].last_mut().unwrap().end = ProgramPoint {
+                    block,
                     inst_index: block_data.len() as u32,
                 };
             }
-
-            self.merge_intervals(func);
-        }
-    }
-
-    pub fn get_live_ranges_for(&self, reg: Reg) -> &[LiveRange] {
-        &self.live_ranges[reg]
-    }
-
-    pub fn get_vreg_live_ranges(&self) -> Vec<LiveRange> {
-        let mut res = Vec::new();
-        for r in self.pregs_count..self.regs_count {
-            res.extend_from_slice(&self.live_ranges[r as u32]);
         }
 
-        res.sort_by_key(|r| r.start);
-        res
+        Self {
+            ranges
+        }
+    }
+}
+
+impl Index<Reg> for LiveRanges {
+    type Output = [LiveRange];
+
+    fn index(&self, index: Reg) -> &Self::Output {
+        &self.ranges[index]
     }
 }
 
@@ -246,7 +216,7 @@ mod tests {
         tir::{BlockData, Func},
     };
 
-    
+
     #[test]
     fn usedef_test() {
         // foo:
@@ -265,7 +235,7 @@ mod tests {
             let mut block_data = BlockData::new();
 
             block_data.push(X64Inst::Mov64rr { dst: RAX, src: v0 });
-            block_data.push(X64Inst::Ret);
+            block_data.push(X64Inst::Ret { src: RAX });
 
             func.add_block(block_data)
         };
@@ -307,7 +277,7 @@ mod tests {
         //     jmp @1
         // @1
         //     mov rax v0
-        //     ret
+        //     ret rax
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
@@ -317,7 +287,7 @@ mod tests {
             let mut block_data = BlockData::new();
 
             block_data.push(X64Inst::Mov64rr { dst: RAX, src: v0 });
-            block_data.push(X64Inst::Ret);
+            block_data.push(X64Inst::Ret { src: RAX });
 
             func.add_block(block_data)
         };
@@ -330,30 +300,40 @@ mod tests {
         }
 
         let cfg = CFG::compute(&func).unwrap();
-        let analysis = LivenessAnalysis::compute(&func, &cfg);
 
-        let v0_ranges = analysis.get_live_ranges_for(v0);
-        let rax_ranges = analysis.get_live_ranges_for(RAX);
+        let live_ranges = LiveRanges::compute(&func, &cfg);
+
+
+        let v0_ranges = &live_ranges[v0];
+        let rax_ranges = &live_ranges[RAX];
 
         assert_eq!(
             rax_ranges,
             [LiveRange {
-                reg: RAX,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
                 },
                 end: ProgramPoint {
-                    block: b1,
+                    block: b0,
                     inst_index: 0,
                 },
-            }]
+            },
+                LiveRange {
+                    start: ProgramPoint {
+                        block: b1,
+                        inst_index: 0,
+                    },
+                    end: ProgramPoint {
+                        block: b1,
+                        inst_index: 1,
+                    },
+                }]
         );
 
         assert_eq!(
             v0_ranges,
             [LiveRange {
-                reg: v0,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -405,25 +385,26 @@ mod tests {
         }
 
         let cfg = CFG::compute(&func).unwrap();
-        let analysis = LivenessAnalysis::compute(&func, &cfg);
-        let v0_ranges = analysis.get_live_ranges_for(v0);
-        let v1_ranges = analysis.get_live_ranges_for(v1);
-        let rax_ranges = analysis.get_live_ranges_for(RAX);
+        let live_ranges = LiveRanges::compute(&func, &cfg);
+        let v0_ranges = &live_ranges[v0];
+        let v1_ranges = &live_ranges[v1];
+        let rax_ranges = &live_ranges[RAX];
+
+        let liveness = LivenessAnalysis::compute(&func, &cfg);
 
         assert_eq!(
-            analysis.live_in[b0].iter_ones().collect::<Vec<_>>(),
+            liveness.live_in[b0].iter_ones().collect::<Vec<_>>(),
             vec![RAX as usize]
         );
 
         assert_eq!(
-            analysis.live_out[b2].iter_ones().collect::<Vec<_>>(),
+            liveness.live_out[b2].iter_ones().collect::<Vec<_>>(),
             vec![RAX as usize]
         );
 
         assert_eq!(
             rax_ranges,
             [LiveRange {
-                reg: RAX,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -438,7 +419,6 @@ mod tests {
         assert_eq!(
             v0_ranges,
             [LiveRange {
-                reg: v0,
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
@@ -453,7 +433,6 @@ mod tests {
         assert_eq!(
             v1_ranges,
             [LiveRange {
-                reg: v1,
                 start: ProgramPoint {
                     block: b1,
                     inst_index: 0,

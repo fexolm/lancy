@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 
 use crate::codegen::tir::{Block, Func, Inst, TirError};
 use crate::support::bitset::FixedBitSet;
-use crate::support::slotmap::{Key, SecondaryMap, SecondaryMapExt};
+use crate::support::slotmap::{Key, SecondaryMap};
 
 #[derive(Default, Clone)]
 struct CFGNode {
@@ -17,8 +17,10 @@ pub struct CFG {
 
 impl CFG {
     pub fn new(entry: Block, size: usize) -> Self {
+        let mut nodes = SecondaryMap::new(size);
+        nodes.fill(CFGNode::default());
         Self {
-            nodes: SecondaryMap::with_default(size),
+            nodes,
             entry,
         }
     }
@@ -45,8 +47,8 @@ impl CFG {
     }
 
     pub fn add_edge(&mut self, successor: Block, predecessor: Block) {
-        self.nodes[successor].predecessors.push(predecessor);
-        self.nodes[predecessor].successors.push(successor);
+        self.nodes.get_mut(successor).unwrap().predecessors.push(predecessor);
+        self.nodes.get_mut(predecessor).unwrap().successors.push(successor);
     }
 
     pub fn preds(&self, block: Block) -> &[Block] {

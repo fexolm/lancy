@@ -1,8 +1,7 @@
 use std::{
-    array::IntoIter,
     marker::PhantomData,
-    ops::{Index, IndexMut},
-    path::Iter,
+    ops::{Index, IndexMut}
+    ,
 };
 
 pub trait Key: Sized + Copy + PartialEq {
@@ -43,7 +42,7 @@ impl<K: Key, V> PrimaryMap<K, V> {
         self.values.len()
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = K> {
+    pub fn keys(&self) -> impl Iterator<Item=K> {
         (0..self.values.len()).map(K::new)
     }
 }
@@ -113,7 +112,7 @@ impl_slotmap_key!(i64);
 #[macro_export]
 macro_rules! slotmap_key {
     ($key:ident ($inner_type:ty) ) => {
-        #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq)]
+        #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq, Default)]
         pub struct $key($inner_type);
 
         use crate::support::slotmap::Key;
@@ -134,57 +133,110 @@ macro_rules! slotmap_key {
     };
 }
 
+#[derive(Default)]
 pub struct SecondaryMap<K: Key, V> {
-    values: Vec<V>,
+    values: Vec<Option<V>>,
     phantom: PhantomData<K>,
 }
 
 impl<K: Key, V: Clone> SecondaryMap<K, V> {
-    pub fn new(cap: usize, val: V) -> Self {
+    pub fn new(cap: usize) -> Self {
         Self {
-            values: vec![val.clone(); cap],
+            values: vec![None; cap],
             phantom: PhantomData,
         }
     }
 
-    pub fn set(&mut self, key: K, val: V) -> K {
-        self.values[key.index()] = val;
+    pub fn fill(&mut self, val: V) {
+        for v in self.values.iter_mut() {
+            *v = Some(val.clone());
+        }
+    }
+
+    pub fn add(&mut self, key: K, val: V) -> K {
+        self.values[key.index()] = Some(val);
         key
+    }
+
+    pub fn contains(&self, key: K) -> bool {
+        key.index() < self.values.len() && self.values[key.index()].is_some()
+    }
+
+    pub fn get(&self, key: K) -> Option<&V> {
+        if key.index() < self.values.len() {
+            self.values[key.index()].as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        if key.index() < self.values.len() {
+            self.values[key.index()].as_mut()
+        } else {
+            None
+        }
     }
 
     pub fn capacity(&self) -> usize {
         self.values.len()
     }
-}
 
-pub trait SecondaryMapExt<K: Key, V: Default + Clone> {
-    fn with_default(cap: usize) -> Self;
-}
+    pub fn iter(&self) -> impl Iterator<Item=(K, &V)> {
+        self.values.iter().enumerate().filter_map(|(i, v)| {
+            if let Some(v) = v.as_ref() {
+                Some((K::new(i), v))
+            } else {
+                None
+            }
+        })
+    }
 
-impl<K: Key, V: Default + Clone> SecondaryMapExt<K, V> for SecondaryMap<K, V> {
-    fn with_default(cap: usize) -> Self {
-        Self::new(cap, Default::default())
+    pub fn iter_mut(&mut self) -> impl Iterator<Item=(K, &mut V)> {
+        self.values.iter_mut().enumerate().filter_map(|(i, v)| {
+            if let Some(v) = v.as_mut() {
+                Some((K::new(i), v))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item=K> {
+        (0..self.values.len()).map(K::new)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item=&V> {
+        self.values.iter().flatten()
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item=&mut V> {
+        self.values.iter_mut().flatten()
     }
 }
 
-impl<K: Key, V> IndexMut<K> for SecondaryMap<K, V> {
+impl<K: Key, V: Default> IndexMut<K> for SecondaryMap<K, V> {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         assert!(index.index() < self.values.len());
-        &mut self.values[index.index()]
+        if self.values[index.index()].is_none() {
+            self.values[index.index()] = Some(Default::default());
+        }
+        self.values[index.index()].as_mut().unwrap()
     }
 }
+
 
 impl<K: Key, V> Index<K> for SecondaryMap<K, V> {
     type Output = V;
 
     fn index(&self, index: K) -> &Self::Output {
         assert!(index.index() < self.values.len());
-        &self.values[index.index()]
+        self.values[index.index()].as_ref().unwrap()
     }
 }
 
-pub struct SecondaryMapIterMut<'i, K: Key, V> {
-    map: &'i mut SecondaryMap<K, V>,
+pub struct SecondaryMapIter<'a, K: Key, V> {
+    map: &'a SecondaryMap<K, V>,
     idx: usize,
 }
 
@@ -211,9 +263,9 @@ mod tests {
 
     #[test]
     fn test_secondary_map() {
-        let mut map = SecondaryMap::with_default(10);
+        let mut map = SecondaryMap::new(10);
         let key = K::new(0);
-        map.set(key, "value");
+        map.add(key, "value");
         assert_eq!(map[key], "value");
     }
 
@@ -226,6 +278,27 @@ mod tests {
         let mut iter = map.iter();
         assert_eq!(iter.next(), Some((K::new(0), &"value1")));
         assert_eq!(iter.next(), Some((K::new(1), &"value2")));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_secondary_map_iter() {
+        let mut map = SecondaryMap::new(10);
+        map.add(K::new(0), "value");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((K::new(0), &"value")));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_secondary_map_iter_mut() {
+        let mut map = SecondaryMap::new(10);
+        let key = K::new(0);
+        map.add(key, "value");
+
+        let mut iter = map.iter_mut();
+        assert_eq!(iter.next(), Some((K::new(0), &mut "value")));
         assert_eq!(iter.next(), None);
     }
 }

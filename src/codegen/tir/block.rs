@@ -1,7 +1,7 @@
 use crate::{codegen::tir::TirError, slotmap_key};
 use std::fmt::{Debug, Display};
 
-use super::Inst;
+use super::{Inst, Instruction, PseudoInstruction};
 
 slotmap_key!(Block(u16));
 
@@ -19,7 +19,7 @@ impl Debug for Block {
 
 #[derive(Clone)]
 pub struct BlockData<I: Inst> {
-    insts: Vec<I>,
+    insts: Vec<Instruction<I>>,
 }
 
 impl<I: Inst> Default for BlockData<I> {
@@ -35,11 +35,14 @@ impl<I: Inst> BlockData<I> {
         BlockData { insts: Vec::new() }
     }
 
-    pub fn push(&mut self, inst: I) {
-        self.insts.push(inst);
+    pub fn push_target_inst(&mut self, inst: I) {
+        self.insts.push(Instruction::Target(inst));
+    }
+    pub fn push_pseudo_inst(&mut self, inst: PseudoInstruction) {
+        self.insts.push(Instruction::Pseudo(inst)); 
     }
 
-    pub fn get_terminator(&self) -> Option<I> {
+    pub fn get_terminator(&self) -> Option<Instruction<I>> {
         if let Some(inst) = self.insts.last()
             && inst.is_term()
         {
@@ -49,7 +52,7 @@ impl<I: Inst> BlockData<I> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &I> {
+    pub fn iter(&self) -> impl Iterator<Item = &Instruction<I>> {
         self.insts.iter()
     }
 

@@ -1,6 +1,6 @@
-use crate::codegen::tir::reverse_post_order;
 use crate::{
-    codegen::tir::{Block, Func, Inst, Reg, CFG},
+    codegen::analysis::cfg::{reverse_post_order, CFG},
+    codegen::tir::{Block, Func, Inst, Reg},
     support::{
         bitset::FixedBitSet,
         slotmap::{Key, SecondaryMap},
@@ -12,6 +12,17 @@ use std::ops::Index;
 pub struct ProgramPoint {
     pub block: Block,
     pub inst_index: u32,
+}
+
+impl ProgramPoint {
+    pub const MAX: ProgramPoint = ProgramPoint {
+        block: Block::NONE_VAL,
+        inst_index: u32::MAX,
+    };
+    pub const MIN: ProgramPoint = ProgramPoint {
+        block: Block(0),
+        inst_index: 0,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -32,7 +43,7 @@ struct LivenessAnalysis {
 
 #[derive(Default)]
 pub struct LiveRanges {
-    ranges: SecondaryMap<Reg, Vec<LiveRange>>,
+    ranges: SecondaryMap<Reg, LiveRange>,
 }
 
 impl UseDefs {
@@ -106,8 +117,8 @@ impl LivenessAnalysis {
         let usedefs = UseDefs::compute(func);
 
         while let Some(block) = worklist.pop() {
-            let line_ins_count = self.live_in[block].ones_count();
-            let line_outs_count = self.live_out[block].ones_count();
+            let live_ins_count = self.live_in[block].ones_count();
+            let live_outs_count = self.live_out[block].ones_count();
 
             let mut live_out = self.live_out.get_mut(block).unwrap();
 
@@ -121,8 +132,8 @@ impl LivenessAnalysis {
             live_in.difference(&usedefs.get_defs(block));
             live_in.union(&usedefs.get_uses(block));
 
-            if self.live_in[block].ones_count() != line_ins_count
-                || self.live_out[block].ones_count() != line_outs_count
+            if self.live_in[block].ones_count() != live_ins_count
+                || self.live_out[block].ones_count() != live_outs_count
             {
                 worklist.extend_from_slice(cfg.preds(block));
             }
@@ -140,28 +151,15 @@ impl LiveRanges {
 
         let liveness = LivenessAnalysis::compute(func, cfg);
 
-        let mut ranges: SecondaryMap<Reg, Vec<LiveRange>> = SecondaryMap::new(func.get_regs_count());
+        let mut ranges: SecondaryMap<Reg, LiveRange> = SecondaryMap::new(func.get_regs_count());
 
-        let mut live_vars = liveness.live_in[entry].clone();
-
-        for r in live_vars.iter_ones() {
-            ranges[r as Reg].push(LiveRange {
-                start: ProgramPoint {
-                    block: entry,
-                    inst_index: 0,
-                },
-                end: ProgramPoint {
-                    block: entry,
-                    inst_index: 0,
-                },
-            });
-        }
+        ranges.fill(LiveRange {
+            start: ProgramPoint::MAX,
+            end: ProgramPoint::MIN,
+        });
 
         for (block, block_data) in func.blocks_iter() {
-            let live_in = &liveness.live_in[block];
             let live_out = &liveness.live_out[block];
-
-            live_vars.union(live_in);
 
             for (idx, inst) in block_data.iter().enumerate() {
                 let p = ProgramPoint {
@@ -170,22 +168,18 @@ impl LiveRanges {
                 };
 
                 for r in inst.get_uses() {
-                    ranges[r].last_mut().unwrap().end = p;
+                    // no need to compare with previous, as we go from top to bottom
+                    ranges[r].end = p;
                 }
 
                 for r in inst.get_defs() {
-                    if live_vars.has(r as usize) && live_out.has(r as usize) {
-                        continue;
-                    }
-
-                    ranges[r].push(LiveRange {
-                        start: p,
-                        end: p,
-                    });
+                    ranges[r].start = std::cmp::min(ranges[r].start, p);
                 }
             }
-            for r in live_out.iter_ones() {
-                ranges[r as Reg].last_mut().unwrap().end = ProgramPoint {
+
+
+            for var in live_out.iter_ones() {
+                ranges[Reg::new(var)].end = ProgramPoint {
                     block,
                     inst_index: block_data.len() as u32,
                 };
@@ -199,7 +193,7 @@ impl LiveRanges {
 }
 
 impl Index<Reg> for LiveRanges {
-    type Output = [LiveRange];
+    type Output = LiveRange;
 
     fn index(&self, index: Reg) -> &Self::Output {
         &self.ranges[index]
@@ -209,11 +203,11 @@ impl Index<Reg> for LiveRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::tir::PseudoInstruction;
     use crate::codegen::{
         isa::x64::inst::X64Inst,
         tir::{BlockData, Func},
     };
-
 
     #[test]
     fn usedef_test() {
@@ -233,17 +227,17 @@ mod tests {
         let b1 = {
             let mut block_data = BlockData::new();
 
-            block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
-            block_data.push(X64Inst::Ret { src: v1 });
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
+            block_data.push_target_inst(X64Inst::Ret { src: v1 });
 
             func.add_block(block_data)
         };
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: v1 });
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v0, src: v1 });
 
-            block_data.push(X64Inst::Jmp { dst: b1 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
         }
 
         let usedefs = UseDefs::compute(&func);
@@ -272,6 +266,7 @@ mod tests {
     fn simple_test() {
         // foo:
         // @0
+        //     arg v1
         //     mov v0 v1
         //     jmp @1
         // @1
@@ -280,23 +275,23 @@ mod tests {
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
+        let b1 = func.add_empty_block();
+
         let v0 = func.new_vreg();
         let v1 = func.new_vreg();
 
-        let b1 = {
-            let mut block_data = BlockData::new();
-
-            block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
-            block_data.push(X64Inst::Ret { src: v1 });
-
-            func.add_block(block_data)
-        };
-
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: v1 });
+            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v1 });
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v0, src: v1 });
 
-            block_data.push(X64Inst::Jmp { dst: b1 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
+        }
+
+        {
+            let block_data = func.get_block_data_mut(b1);
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
+            block_data.push_target_inst(X64Inst::Ret { src: v1 });
         }
 
         let cfg = CFG::compute(&func).unwrap();
@@ -304,45 +299,35 @@ mod tests {
         let live_ranges = LiveRanges::compute(&func, &cfg);
 
 
-        let v0_ranges = &live_ranges[v0];
-        let rax_ranges = &live_ranges[v1];
+        let v0_range = &live_ranges[v0];
+        let v1_range = &live_ranges[v1];
 
         assert_eq!(
-            rax_ranges,
-            [LiveRange {
+            v0_range,
+            &LiveRange {
                 start: ProgramPoint {
                     block: b0,
-                    inst_index: 0,
+                    inst_index: 1,
                 },
                 end: ProgramPoint {
-                    block: b0,
+                    block: b1,
                     inst_index: 0,
                 },
-            },
-                LiveRange {
-                    start: ProgramPoint {
-                        block: b1,
-                        inst_index: 0,
-                    },
-                    end: ProgramPoint {
-                        block: b1,
-                        inst_index: 1,
-                    },
-                }]
+            }
         );
 
         assert_eq!(
-            v0_ranges,
-            [LiveRange {
+            v1_range,
+            &LiveRange {
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
                 },
                 end: ProgramPoint {
                     block: b1,
-                    inst_index: 0,
+                    inst_index: 1,
                 },
-            }]
+            }
         );
     }
 
@@ -350,14 +335,17 @@ mod tests {
     fn test_loop() {
         // foo:
         // @0
-        //     mov v0 v2
+        //     arg v2
         //     jmp @1
         // @1
-        //     mov v1 v0
+        //     mov v0 v2
         //     jmp @2
         // @2
+        //     mov v1 v0
+        //     jmp @3
+        // @3
         //     mov v2 v1
-        //     jmp @0
+        //     jmp @1
 
         let mut func = Func::<X64Inst>::new("foo".to_string());
         let b0 = func.add_empty_block();
@@ -367,83 +355,100 @@ mod tests {
 
         let b1 = func.add_empty_block();
         let b2 = func.add_empty_block();
+        let b3 = func.add_empty_block();
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: v2 });
-            block_data.push(X64Inst::Jmp { dst: b1 });
+            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v2 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
         }
 
         {
             let block_data = func.get_block_data_mut(b1);
-            block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
-            block_data.push(X64Inst::Jmp { dst: b2 });
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v0, src: v2 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b2 });
         }
 
         {
             let block_data = func.get_block_data_mut(b2);
-            block_data.push(X64Inst::Mov64rr { dst: v2, src: v1 });
-            block_data.push(X64Inst::Jmp { dst: b0 });
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b3 });
+        }
+
+        {
+            let block_data = func.get_block_data_mut(b3);
+            block_data.push_target_inst(X64Inst::Mov64rr { dst: v2, src: v1 });
+            block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
         }
 
         let cfg = CFG::compute(&func).unwrap();
         let live_ranges = LiveRanges::compute(&func, &cfg);
-        let v0_ranges = &live_ranges[v0];
-        let v1_ranges = &live_ranges[v1];
-        let v2_ranges = &live_ranges[v2];
+        let v0_range = &live_ranges[v0];
+        let v1_range = &live_ranges[v1];
+        let v2_range = &live_ranges[v2];
 
         let liveness = LivenessAnalysis::compute(&func, &cfg);
 
         assert_eq!(
             liveness.live_in[b0].iter_ones().collect::<Vec<_>>(),
+            vec![]
+        );
+
+        assert_eq!(
+            liveness.live_in[b1].iter_ones().collect::<Vec<_>>(),
             vec![v2 as usize]
+        );
+
+        assert_eq!(
+            liveness.live_in[b2].iter_ones().collect::<Vec<_>>(),
+            vec![v0 as usize]
         );
 
         assert_eq!(
             liveness.live_out[b2].iter_ones().collect::<Vec<_>>(),
-            vec![v2 as usize]
+            vec![v1 as usize]
         );
 
         assert_eq!(
-            v2_ranges,
-            [LiveRange {
+            v0_range,
+            &LiveRange {
+                start: ProgramPoint {
+                    block: b1,
+                    inst_index: 0,
+                },
+                end: ProgramPoint {
+                    block: b2,
+                    inst_index: 0,
+                },
+            }
+        );
+
+        assert_eq!(
+            v1_range,
+            &LiveRange {
+                start: ProgramPoint {
+                    block: b2,
+                    inst_index: 0,
+                },
+                end: ProgramPoint {
+                    block: b3,
+                    inst_index: 0,
+                },
+            }
+        );
+
+        assert_eq!(
+            v2_range,
+            &LiveRange {
                 start: ProgramPoint {
                     block: b0,
                     inst_index: 0,
                 },
                 end: ProgramPoint {
-                    block: b2,
+                    block: b3,
                     inst_index: 2,
                 },
-            }]
-        );
-
-        assert_eq!(
-            v0_ranges,
-            [LiveRange {
-                start: ProgramPoint {
-                    block: b0,
-                    inst_index: 0,
-                },
-                end: ProgramPoint {
-                    block: b1,
-                    inst_index: 0,
-                },
-            }]
-        );
-
-        assert_eq!(
-            v1_ranges,
-            [LiveRange {
-                start: ProgramPoint {
-                    block: b1,
-                    inst_index: 0,
-                },
-                end: ProgramPoint {
-                    block: b2,
-                    inst_index: 0,
-                },
-            }]
+            }
         );
     }
 }

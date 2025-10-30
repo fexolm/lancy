@@ -1,5 +1,5 @@
-use smallvec::SmallVec;
-use std::fmt::Display;
+use smallvec::{smallvec, SmallVec};
+use std::fmt::{Display, Formatter};
 
 use crate::codegen::tir::Block;
 
@@ -17,12 +17,103 @@ pub trait Inst: Sized + Copy + Display {
     fn get_defs(&self) -> SmallVec<[Reg; 1]>;
 
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]>;
+}
 
-    fn preg_name(reg: Reg) -> String;
+#[derive(Copy, Clone, Debug)]
+pub enum PseudoInstruction {
+    Arg { dst: Reg }
+}
 
-    fn preg_count() -> u32;
+impl Display for PseudoInstruction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
 
-    fn replace(&self, old: Reg, new: Reg) -> Self;
+impl Inst for PseudoInstruction {
+    fn is_branch(&self) -> bool {
+        match self {
+            _ => false,
+        }
+    }
+
+    fn is_ret(&self) -> bool {
+        match self {
+            _ => false,
+        }
+    }
+
+    fn get_uses(&self) -> SmallVec<[Reg; 2]> {
+        match self {
+            PseudoInstruction::Arg { .. } => smallvec![],
+            _ => todo!(),
+        }
+    }
+
+    fn get_defs(&self) -> SmallVec<[Reg; 1]> {
+        match self {
+            PseudoInstruction::Arg { dst } => smallvec![*dst],
+            _ => todo!(),
+        }
+    }
+
+    fn get_branch_targets(&self) -> SmallVec<[Block; 2]> {
+        match self {
+            _ => smallvec![],
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Instruction<I: Inst> {
+    Target(I),
+    Pseudo(PseudoInstruction),
+}
+
+impl<I: Inst> Display for Instruction<I> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Instruction::Pseudo(inst) => write!(f, "{}", inst),
+            Instruction::Target(inst) => write!(f, "{}", inst),
+        }
+    }
+}
+
+impl<I: Inst> Inst for Instruction<I> {
+    fn is_branch(&self) -> bool {
+        match self {
+            Instruction::Target(inst) => inst.is_branch(),
+            Instruction::Pseudo(inst) => inst.is_branch(),
+        }
+    }
+
+    fn is_ret(&self) -> bool {
+        match self {
+            Instruction::Target(inst) => inst.is_ret(),
+            Instruction::Pseudo(inst) => inst.is_ret(),
+        }
+    }
+
+    fn get_uses(&self) -> SmallVec<[Reg; 2]> {
+        match self {
+            Instruction::Target(inst) => inst.get_uses(),
+            Instruction::Pseudo(inst) => inst.get_uses(),
+        }
+    }
+
+    fn get_defs(&self) -> SmallVec<[Reg; 1]> {
+        match self {
+            Instruction::Target(inst) => inst.get_defs(),
+            Instruction::Pseudo(inst) => inst.get_defs(),
+        }
+    }
+
+    fn get_branch_targets(&self) -> SmallVec<[Block; 2]> {
+        match self {
+            Instruction::Target(inst) => inst.get_branch_targets(),
+            Instruction::Pseudo(inst) => inst.get_branch_targets(),
+        }
+    }
 }
 
 pub fn reg_name<I: Inst>(reg: Reg) -> String {

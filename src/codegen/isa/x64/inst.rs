@@ -1,11 +1,8 @@
 use std::fmt::Display;
 
-use crate::codegen::{
-    isa::x64::regs::*,
-    tir::{self, Block, Inst, Reg},
-};
+use crate::codegen::tir::{self, Block, Inst, Reg};
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
 #[derive(Clone, Copy)]
 pub enum Cond {
@@ -95,14 +92,14 @@ impl Inst for X64Inst {
 
     fn is_ret(&self) -> bool {
         match self {
-            X64Inst::Ret{..} => true,
+            X64Inst::Ret { .. } => true,
             _ => false,
         }
     }
 
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
         match self {
-            X64Inst::Ret{src} => smallvec![*src],
+            X64Inst::Ret { src } => smallvec![*src],
             X64Inst::Jmp { .. } => smallvec![],
             X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Mov64rm { dst, src } => src.get_uses(),
@@ -119,7 +116,7 @@ impl Inst for X64Inst {
     }
     fn get_defs(&self) -> SmallVec<[Reg; 1]> {
         match self {
-            X64Inst::Ret{..} => smallvec![],
+            X64Inst::Ret { .. } => smallvec![],
             X64Inst::Jmp { .. } => smallvec![],
             X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Mov64rm { dst, src } => smallvec![*dst],
@@ -140,81 +137,28 @@ impl Inst for X64Inst {
             _ => smallvec![],
         }
     }
-
-    fn preg_name(reg: Reg) -> String {
-        match reg {
-            RAX => "rax".to_string(),
-            RBX => "rbx".to_string(),
-            RCX => "rcx".to_string(),
-            RDX => "rdx".to_string(),
-            RSI => "rsi".to_string(),
-            RDI => "rdi".to_string(),
-            RSP => "rsp".to_string(),
-            RBP => "rbp".to_string(),
-            R8 => "r8".to_string(),
-            R9 => "r9".to_string(),
-            R10 => "r10".to_string(),
-            R11 => "r11".to_string(),
-            R12 => "r12".to_string(),
-            R13 => "r13".to_string(),
-            R14 => "r14".to_string(),
-            R15 => "r15".to_string(),
-            _ => unreachable!(),
-        }
-    }
-
-    fn preg_count() -> u32 {
-        REGISTERS_COUNT
-    }
-
-    fn replace(&self, old: Reg, new: Reg) -> Self {
-        fn replace_reg(cur: Reg, old: Reg, new: Reg) -> Reg {
-            if old == cur { new } else { cur }
-        }
-
-        fn replace_mem(mem: Mem, old: Reg, new: Reg) -> Mem {
-            Mem {
-                reg: replace_reg(mem.reg, old, new),
-                index: if let Some(idx) = mem.index {
-                    Some(replace_reg(idx, old, new))
-                } else {
-                    None
-                },
-                scale: mem.scale,
-                disp: mem.disp,
-            }
-        }
-
-        match *self {
-            X64Inst::Ret{..} => *self,
-            X64Inst::Jmp { .. } => *self,
-            X64Inst::CondJmp { .. } => *self,
-            X64Inst::Mov64rm { dst, src } => X64Inst::Mov64rm {
-                dst: replace_reg(dst, old, new),
-                src: replace_mem(src, old, new),
-            },
-            X64Inst::Mov64mr { dst, src } => X64Inst::Mov64mr {
-                dst: replace_mem(dst, old, new),
-                src: replace_reg(src, old, new),
-            },
-            X64Inst::Mov64rr { dst, src } => X64Inst::Mov64rr {
-                dst: replace_reg(dst, old, new),
-                src: replace_reg(src, old, new),
-            },
-            X64Inst::Mov64ri64 { dst, src } => X64Inst::Mov64ri64 {
-                dst: replace_reg(dst, old, new),
-                src,
-            },
-            X64Inst::Mov64mi64 { dst, src } => X64Inst::Mov64mi64 {
-                dst: replace_mem(dst, old, new),
-                src,
-            },
-            X64Inst::CMP64rr { lhs, rhs } => X64Inst::CMP64rr {
-                lhs: replace_reg(lhs, old, new),
-                rhs: replace_reg(rhs, old, new),
-            },
-        }
-    }
+    //
+    // fn preg_name(reg: Reg) -> String {
+    //     match reg {
+    //         RAX => "rax".to_string(),
+    //         RBX => "rbx".to_string(),
+    //         RCX => "rcx".to_string(),
+    //         RDX => "rdx".to_string(),
+    //         RSI => "rsi".to_string(),
+    //         RDI => "rdi".to_string(),
+    //         RSP => "rsp".to_string(),
+    //         RBP => "rbp".to_string(),
+    //         R8 => "r8".to_string(),
+    //         R9 => "r9".to_string(),
+    //         R10 => "r10".to_string(),
+    //         R11 => "r11".to_string(),
+    //         R12 => "r12".to_string(),
+    //         R13 => "r13".to_string(),
+    //         R14 => "r14".to_string(),
+    //         R15 => "r15".to_string(),
+    //         _ => unreachable!(),
+    //     }
+    // }
 }
 
 fn reg_name(reg: Reg) -> String {
@@ -224,7 +168,7 @@ fn reg_name(reg: Reg) -> String {
 impl Display for X64Inst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            X64Inst::Ret{src} => write!(f, "ret {}", reg_name(*src)),
+            X64Inst::Ret { src } => write!(f, "ret {}", reg_name(*src)),
             X64Inst::Jmp { dst } => write!(f, "jmp {dst}"),
             X64Inst::CondJmp {
                 cond,

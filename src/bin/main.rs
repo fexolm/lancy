@@ -1,7 +1,6 @@
 use lancy::codegen::regalloc::RegisterBinding;
-use lancy::codegen::tir::CFG;
 use lancy::codegen::{
-    // analysis::LivenessAnalysis,
+    analysis::cfg::CFG,
     isa::x64::{inst::X64Inst, regs::*},
     tir::Func,
 };
@@ -18,20 +17,20 @@ fn main() {
 
     {
         let block_data = func.get_block_data_mut(b0);
-        block_data.push(X64Inst::Mov64rr { dst: v0, src: v2 });
-        block_data.push(X64Inst::Jmp { dst: b1 });
+        block_data.push_target_inst(X64Inst::Mov64rr { dst: v0, src: v2 });
+        block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
     }
 
     {
         let block_data = func.get_block_data_mut(b1);
-        block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
-        block_data.push(X64Inst::Jmp { dst: b2 });
+        block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
+        block_data.push_target_inst(X64Inst::Jmp { dst: b2 });
     }
 
     {
         let block_data = func.get_block_data_mut(b2);
-        block_data.push(X64Inst::Mov64rr { dst: v3, src: v1 });
-        block_data.push(X64Inst::Ret { src: v3 });
+        block_data.push_target_inst(X64Inst::Mov64rr { dst: v3, src: v1 });
+        block_data.push_target_inst(X64Inst::Ret { src: v3 });
     }
 
     let cfg = CFG::compute(&func).unwrap();

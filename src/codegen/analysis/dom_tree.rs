@@ -1,6 +1,6 @@
-use crate::codegen::tir::reverse_post_order;
 use crate::{
-    codegen::tir::{Block, Inst, CFG},
+    codegen::analysis::cfg::{reverse_post_order, CFG},
+    codegen::tir::{Block, Inst},
     support::slotmap::{Key, SecondaryMap},
 };
 

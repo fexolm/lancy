@@ -5,14 +5,13 @@ use std::{
 };
 
 pub trait Key: Sized + Copy + PartialEq {
+    const NONE_VAL: Self;
     fn new(v: usize) -> Self;
 
     fn index(&self) -> usize;
 
-    fn none_val() -> Self;
-
     fn is_none(self) -> bool {
-        self == Self::none_val()
+        self == Self::NONE_VAL
     }
 }
 
@@ -79,23 +78,21 @@ impl<'i, K: Key, V> Iterator for PrimaryMapIter<'i, K, V> {
                 return Some((Key::new(idx), v));
             }
         }
-        return None;
+        None
     }
 }
 
 macro_rules! impl_slotmap_key {
     ($type:ty) => {
         impl Key for $type {
+            const NONE_VAL: Self = <$type>::MAX;
+
             fn new(v: usize) -> Self {
                 v as $type
             }
 
             fn index(&self) -> usize {
                 *self as usize
-            }
-
-            fn none_val() -> Self {
-                <$type>::max_value()
             }
         }
     };
@@ -113,21 +110,19 @@ impl_slotmap_key!(i64);
 macro_rules! slotmap_key {
     ($key:ident ($inner_type:ty) ) => {
         #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq, Default)]
-        pub struct $key($inner_type);
+        pub struct $key(pub $inner_type);
 
         use crate::support::slotmap::Key;
 
         impl Key for $key {
+            const NONE_VAL: Self = Self(<$inner_type>::MAX);
+
             fn new(v: usize) -> Self {
                 Self(v as $inner_type)
             }
 
             fn index(&self) -> usize {
                 self.0 as usize
-            }
-
-            fn none_val() -> Self {
-                Self(<$inner_type>::max_value())
             }
         }
     };

@@ -20,11 +20,11 @@ pub struct LiveRange {
     pub end: ProgramPoint,
 }
 
-
 struct UseDefs {
     uses: SecondaryMap<Block, FixedBitSet>,
     defs: SecondaryMap<Block, FixedBitSet>,
 }
+
 struct LivenessAnalysis {
     live_in: SecondaryMap<Block, FixedBitSet>,
     live_out: SecondaryMap<Block, FixedBitSet>,
@@ -34,7 +34,6 @@ struct LivenessAnalysis {
 pub struct LiveRanges {
     ranges: SecondaryMap<Reg, Vec<LiveRange>>,
 }
-
 
 impl UseDefs {
     pub fn compute<I: Inst>(func: &Func<I>) -> Self {
@@ -86,7 +85,6 @@ impl UseDefs {
 impl LivenessAnalysis {
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
         let regs_count = func.get_regs_count() as usize;
-        let pregs_count = I::preg_count() as usize;
         let mut live_in = SecondaryMap::new(cfg.blocks_count());
         live_in.fill(FixedBitSet::zeroes(regs_count));
         let mut live_out = SecondaryMap::new(cfg.blocks_count());
@@ -212,7 +210,7 @@ impl Index<Reg> for LiveRanges {
 mod tests {
     use super::*;
     use crate::codegen::{
-        isa::x64::{inst::X64Inst, regs::*},
+        isa::x64::inst::X64Inst,
         tir::{BlockData, Func},
     };
 
@@ -221,28 +219,29 @@ mod tests {
     fn usedef_test() {
         // foo:
         // @0
-        //     mov v0 rax
+        //     mov v0 v1
         //     jmp @1
         // @1
-        //     mov rax v0
+        //     mov v1 v0
         //     ret
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
         let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
 
         let b1 = {
             let mut block_data = BlockData::new();
 
-            block_data.push(X64Inst::Mov64rr { dst: RAX, src: v0 });
-            block_data.push(X64Inst::Ret { src: RAX });
+            block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
+            block_data.push(X64Inst::Ret { src: v1 });
 
             func.add_block(block_data)
         };
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: RAX });
+            block_data.push(X64Inst::Mov64rr { dst: v0, src: v1 });
 
             block_data.push(X64Inst::Jmp { dst: b1 });
         }
@@ -251,7 +250,7 @@ mod tests {
 
         assert_eq!(
             usedefs.get_uses(b0).iter_ones().collect::<Vec<_>>(),
-            vec![RAX as usize]
+            vec![v1 as usize]
         );
         assert_eq!(
             usedefs.get_defs(b0).iter_ones().collect::<Vec<_>>(),
@@ -264,7 +263,7 @@ mod tests {
         );
         assert_eq!(
             usedefs.get_defs(b1).iter_ones().collect::<Vec<_>>(),
-            vec![RAX as usize]
+            vec![v1 as usize]
         );
     }
 
@@ -273,28 +272,29 @@ mod tests {
     fn simple_test() {
         // foo:
         // @0
-        //     mov v0 rax
+        //     mov v0 v1
         //     jmp @1
         // @1
-        //     mov rax v0
-        //     ret rax
+        //     mov v1 v0
+        //     ret v1
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
         let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
 
         let b1 = {
             let mut block_data = BlockData::new();
 
-            block_data.push(X64Inst::Mov64rr { dst: RAX, src: v0 });
-            block_data.push(X64Inst::Ret { src: RAX });
+            block_data.push(X64Inst::Mov64rr { dst: v1, src: v0 });
+            block_data.push(X64Inst::Ret { src: v1 });
 
             func.add_block(block_data)
         };
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: RAX });
+            block_data.push(X64Inst::Mov64rr { dst: v0, src: v1 });
 
             block_data.push(X64Inst::Jmp { dst: b1 });
         }
@@ -305,7 +305,7 @@ mod tests {
 
 
         let v0_ranges = &live_ranges[v0];
-        let rax_ranges = &live_ranges[RAX];
+        let rax_ranges = &live_ranges[v1];
 
         assert_eq!(
             rax_ranges,
@@ -350,25 +350,27 @@ mod tests {
     fn test_loop() {
         // foo:
         // @0
-        //     mov v0 rax
+        //     mov v0 v2
         //     jmp @1
         // @1
         //     mov v1 v0
         //     jmp @2
         // @2
-        //     mov rax v1
+        //     mov v2 v1
         //     jmp @0
 
         let mut func = Func::<X64Inst>::new("foo".to_string());
         let b0 = func.add_empty_block();
         let v0 = func.new_vreg();
         let v1 = func.new_vreg();
+        let v2 = func.new_vreg();
+
         let b1 = func.add_empty_block();
         let b2 = func.add_empty_block();
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push(X64Inst::Mov64rr { dst: v0, src: RAX });
+            block_data.push(X64Inst::Mov64rr { dst: v0, src: v2 });
             block_data.push(X64Inst::Jmp { dst: b1 });
         }
 
@@ -380,7 +382,7 @@ mod tests {
 
         {
             let block_data = func.get_block_data_mut(b2);
-            block_data.push(X64Inst::Mov64rr { dst: RAX, src: v1 });
+            block_data.push(X64Inst::Mov64rr { dst: v2, src: v1 });
             block_data.push(X64Inst::Jmp { dst: b0 });
         }
 
@@ -388,22 +390,22 @@ mod tests {
         let live_ranges = LiveRanges::compute(&func, &cfg);
         let v0_ranges = &live_ranges[v0];
         let v1_ranges = &live_ranges[v1];
-        let rax_ranges = &live_ranges[RAX];
+        let v2_ranges = &live_ranges[v2];
 
         let liveness = LivenessAnalysis::compute(&func, &cfg);
 
         assert_eq!(
             liveness.live_in[b0].iter_ones().collect::<Vec<_>>(),
-            vec![RAX as usize]
+            vec![v2 as usize]
         );
 
         assert_eq!(
             liveness.live_out[b2].iter_ones().collect::<Vec<_>>(),
-            vec![RAX as usize]
+            vec![v2 as usize]
         );
 
         assert_eq!(
-            rax_ranges,
+            v2_ranges,
             [LiveRange {
                 start: ProgramPoint {
                     block: b0,

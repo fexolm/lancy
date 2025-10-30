@@ -14,11 +14,9 @@ pub struct Func<I: Inst> {
 
 impl<I: Inst> Func<I> {
     pub fn new(name: String) -> Self {
-        let mut regs_count = I::preg_count() as u32;
-
         Func {
             name,
-            regs_count,
+            regs_count: 0,
             blocks: PrimaryMap::new(),
         }
     }

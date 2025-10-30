@@ -26,9 +26,5 @@ pub trait Inst: Sized + Copy + Display {
 }
 
 pub fn reg_name<I: Inst>(reg: Reg) -> String {
-    if reg < I::preg_count() {
-        I::preg_name(reg)
-    } else {
-        format!("v{}", reg - I::preg_count())
-    }
+    format!("v{}", reg)
 }

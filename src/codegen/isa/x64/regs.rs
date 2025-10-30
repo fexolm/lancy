@@ -1,4 +1,5 @@
 use crate::codegen::tir::Reg;
+pub(super) const REGISTERS_COUNT: u32 = 16;
 
 pub const RAX: Reg = 0;
 pub const RBX: Reg = 1;
@@ -17,4 +18,3 @@ pub const R13: Reg = 13;
 pub const R14: Reg = 14;
 pub const R15: Reg = 15;
 
-pub(super) const REGISTERS_COUNT: u32 = 16;

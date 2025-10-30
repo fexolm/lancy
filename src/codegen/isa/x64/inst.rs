@@ -85,17 +85,17 @@ pub enum X64Inst {
 }
 
 impl Inst for X64Inst {
-    fn is_ret(&self) -> bool {
-        match self {
-            X64Inst::Ret{..} => true,
-            _ => false,
-        }
-    }
-
     fn is_branch(&self) -> bool {
         match self {
             X64Inst::Jmp { .. } => true,
             X64Inst::CondJmp { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_ret(&self) -> bool {
+        match self {
+            X64Inst::Ret{..} => true,
             _ => false,
         }
     }
@@ -141,7 +141,7 @@ impl Inst for X64Inst {
         }
     }
 
-    fn preg_name(reg: crate::codegen::tir::Reg) -> String {
+    fn preg_name(reg: Reg) -> String {
         match reg {
             RAX => "rax".to_string(),
             RBX => "rbx".to_string(),
@@ -161,6 +161,10 @@ impl Inst for X64Inst {
             R15 => "r15".to_string(),
             _ => unreachable!(),
         }
+    }
+
+    fn preg_count() -> u32 {
+        REGISTERS_COUNT
     }
 
     fn replace(&self, old: Reg, new: Reg) -> Self {
@@ -210,10 +214,6 @@ impl Inst for X64Inst {
                 rhs: replace_reg(rhs, old, new),
             },
         }
-    }
-
-    fn preg_count() -> u32 {
-        REGISTERS_COUNT
     }
 }
 

@@ -43,7 +43,7 @@ struct LivenessAnalysis {
 
 #[derive(Default)]
 pub struct LiveRanges {
-    ranges: SecondaryMap<Reg, LiveRange>,
+    pub(crate) ranges: SecondaryMap<Reg, LiveRange>,
 }
 
 impl UseDefs {

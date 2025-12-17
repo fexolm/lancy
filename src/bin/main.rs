@@ -41,7 +41,7 @@ fn main() {
 
     println!("{func}");
 
-    let mut regalloc = RegAlloc::new(&func, &cfg);
+    // let mut regalloc = RegAlloc::new(&func, &cfg);
     // let regalloc_intervals = regalloc.run();
     // apply_regalloc_result(&mut func, regalloc_intervals);
 

@@ -11,42 +11,30 @@ use std::collections::{BTreeSet, HashMap, LinkedList};
 use std::ptr::null;
 use crate::codegen::tir::Block;
 
+pub type StackSlot = u32;
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum AllocatedSlot {
     Reg(Reg),
-    Stack(u32),
+    Stack(StackSlot),
 }
 
-pub struct RegAllocResult<'i, I: Inst> {
-    func: &'i Func<I>,
-    config: RegAllocConfig,
-    coloring: SecondaryMap<Reg, AllocatedSlot>,
-    last_block: Block,
-    last_inst: usize
+pub struct RegAllocResult {
+    pub coloring: SecondaryMap<Reg, AllocatedSlot>,
+    pub frame_layout: SecondaryMap<StackSlot, usize>
 }
 
-impl<'i, I: Inst> RegAllocResult<'i, I> {
+impl RegAllocResult {
     pub fn new(
-        func: &'i Func<I>,
-        config: RegAllocConfig,
         coloring: SecondaryMap<Reg, AllocatedSlot>,
+        frame_layout: SecondaryMap<StackSlot, usize>,
     ) -> Self {
         Self {
-            func,
-            config,
             coloring,
-            last_block: Block(0),
-            last_inst: 0
+            frame_layout,
         }
     }
 }
-
-// impl<'i, I: Inst> Iterator for RegAllocResult<'i, I> {
-//     type Item = I;
-//     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-//         
-//     }
-// }
 
 #[derive(Clone)]
 pub struct RegAllocConfig {
@@ -106,7 +94,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
         }
     }
 
-    pub fn run(&mut self) -> RegAllocResult<'_, I> {
+    pub fn run(&mut self) -> RegAllocResult {
         let live_ranges: LiveRanges = LiveRanges::compute(&self.func, &self.cfg);
         let mut sorted_live_ranges: Vec<(Reg, &LiveRange)> = live_ranges.iter().collect();
         sorted_live_ranges.sort_by_key(|(_, range)| range.start);
@@ -117,6 +105,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
 
         let mut coloring: SecondaryMap<Reg, AllocatedSlot> =
             SecondaryMap::new(self.func.get_regs_count()); // (Virtual register, Physical Register)
+        let mut frame_layout: SecondaryMap<StackSlot, usize> = SecondaryMap::new(self.func.get_regs_count());
         for (vreg, lr) in sorted_live_ranges.iter() {
             self.expire(lr.start);
 
@@ -125,6 +114,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
                 if !self.free_regs.has(preg as usize) {
                     let spill_reg = self.last_preg_use[preg];
                     coloring.set(spill_reg, AllocatedSlot::Stack(self.stack_slots));
+                    frame_layout.set(self.stack_slots, (self.stack_slots * 8) as usize);
                     self.stack_slots += 1;
                 }
                 self.free_regs.del(preg as usize);
@@ -141,15 +131,12 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
                 self.last_preg_use.set(preg, *vreg);
             } else {
                 coloring.set(*vreg, AllocatedSlot::Stack(self.stack_slots));
+                frame_layout.set(self.stack_slots, (self.stack_slots * 8) as usize);
                 self.stack_slots += 1;
             }
         }
 
-        for (vir_reg, phys_reg) in coloring.iter() {
-            println!("v{:?}->{:?}", vir_reg, phys_reg);
-        }
-
-        RegAllocResult::new(self.func, self.config.clone(), coloring)
+        RegAllocResult::new(coloring, frame_layout)
     }
 }
 
@@ -222,6 +209,15 @@ mod tests {
         };
         let mut regalloc = RegAlloc::new(&func, &cfg, reg_alloc_config);
         let res = regalloc.run();
+
+        for (vir_reg, phys_reg) in res.coloring.iter() {
+            println!("v{:?}->{:?}", vir_reg, phys_reg);
+        }
+
+        for (stack_slot, offest) in res.frame_layout.iter() {
+            println!("slot {:?} offset {:?}", stack_slot, offest);
+        }
+
         assert_eq!(true, true);
     }
 }

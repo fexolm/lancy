@@ -95,7 +95,7 @@ impl UseDefs {
 
 impl LivenessAnalysis {
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
-        let regs_count = func.get_regs_count() as usize;
+        let regs_count = func.get_regs_count();
         let mut live_in = SecondaryMap::new(cfg.blocks_count());
         live_in.fill(FixedBitSet::zeroes(regs_count));
         let mut live_out = SecondaryMap::new(cfg.blocks_count());
@@ -112,7 +112,6 @@ impl LivenessAnalysis {
 
     fn do_compute<I: Inst>(&mut self, func: &Func<I>, cfg: &CFG) {
         let mut worklist = reverse_post_order(cfg);
-        let mut changed = true;
 
         let usedefs = UseDefs::compute(func);
 
@@ -120,17 +119,17 @@ impl LivenessAnalysis {
             let live_ins_count = self.live_in[block].ones_count();
             let live_outs_count = self.live_out[block].ones_count();
 
-            let mut live_out = self.live_out.get_mut(block).unwrap();
+            let live_out = self.live_out.get_mut(block).unwrap();
 
             for &s in cfg.succs(block) {
                 live_out.union(&self.live_in[s]);
             }
 
-            let mut live_in = self.live_in.get_mut(block).unwrap();
+            let live_in = self.live_in.get_mut(block).unwrap();
 
             live_in.union(&self.live_out[block]);
-            live_in.difference(&usedefs.get_defs(block));
-            live_in.union(&usedefs.get_uses(block));
+            live_in.difference(usedefs.get_defs(block));
+            live_in.union(usedefs.get_uses(block));
 
             if self.live_in[block].ones_count() != live_ins_count
                 || self.live_out[block].ones_count() != live_outs_count
@@ -152,7 +151,7 @@ impl LiveRanges {
     }
 
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
-        let entry = if let Some(entry) = func.get_entry_block() {
+        if let Some(entry) = func.get_entry_block() {
             entry
         } else {
             return Self::default();

@@ -75,8 +75,7 @@ pub fn reverse_post_order(cfg: &CFG) -> Vec<Block> {
     let entry = cfg.get_entry_block();
     stack.push(entry);
 
-    let mut rpo = Vec::new();
-    rpo.reserve(cfg.blocks_count());
+    let mut rpo = Vec::with_capacity(cfg.blocks_count());
 
     while let Some(block) = stack.pop() {
         if visited.has(block.index()) {

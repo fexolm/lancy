@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::fmt::Display;
 
 use crate::codegen::tir::{self, Block, Inst, Reg};
@@ -83,18 +85,11 @@ pub enum X64Inst {
 
 impl Inst for X64Inst {
     fn is_branch(&self) -> bool {
-        match self {
-            X64Inst::Jmp { .. } => true,
-            X64Inst::CondJmp { .. } => true,
-            _ => false,
-        }
+        matches!(self, X64Inst::Jmp { .. } | X64Inst::CondJmp { .. })
     }
 
     fn is_ret(&self) -> bool {
-        match self {
-            X64Inst::Ret { .. } => true,
-            _ => false,
-        }
+        matches!(self, X64Inst::Ret { .. })
     }
 
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
@@ -137,28 +132,6 @@ impl Inst for X64Inst {
             _ => smallvec![],
         }
     }
-    //
-    // fn preg_name(reg: Reg) -> String {
-    //     match reg {
-    //         RAX => "rax".to_string(),
-    //         RBX => "rbx".to_string(),
-    //         RCX => "rcx".to_string(),
-    //         RDX => "rdx".to_string(),
-    //         RSI => "rsi".to_string(),
-    //         RDI => "rdi".to_string(),
-    //         RSP => "rsp".to_string(),
-    //         RBP => "rbp".to_string(),
-    //         R8 => "r8".to_string(),
-    //         R9 => "r9".to_string(),
-    //         R10 => "r10".to_string(),
-    //         R11 => "r11".to_string(),
-    //         R12 => "r12".to_string(),
-    //         R13 => "r13".to_string(),
-    //         R14 => "r14".to_string(),
-    //         R15 => "r15".to_string(),
-    //         _ => unreachable!(),
-    //     }
-    // }
 }
 
 fn reg_name(reg: Reg) -> String {

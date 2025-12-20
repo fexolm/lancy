@@ -1,4 +1,4 @@
-use crate::{codegen::tir::TirError, slotmap_key};
+use crate::slotmap_key;
 use std::fmt::{Debug, Display};
 
 use super::{Inst, Instruction, PseudoInstruction};
@@ -59,12 +59,16 @@ impl<I: Inst> BlockData<I> {
     pub fn len(&self) -> usize {
         self.insts.len()
     }
+    
+    pub fn is_empty(&self) -> bool {
+        self.insts.is_empty()
+    }
 }
 
 impl<I: Inst> Display for BlockData<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for inst in &self.insts {
-            write!(f, "    {inst}\n")?;
+            writeln!(f, "    {inst}")?;
         }
         Ok(())
     }

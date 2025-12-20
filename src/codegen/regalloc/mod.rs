@@ -1,5 +1,5 @@
-mod regalloc;
+mod fast;
 mod regbind;
 
-pub use regalloc::*;
+pub use fast::*;
 pub use regbind::*;

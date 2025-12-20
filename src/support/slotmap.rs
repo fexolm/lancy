@@ -20,6 +20,12 @@ pub struct PrimaryMap<K: Key, V> {
     _key: PhantomData<K>,
 }
 
+impl<K: Key, V> Default for PrimaryMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Key, V> PrimaryMap<K, V> {
     pub fn new() -> Self {
         Self {
@@ -34,11 +40,15 @@ impl<K: Key, V> PrimaryMap<K, V> {
     }
 
     pub fn iter(&self) -> PrimaryMapIter<'_, K, V> {
-        PrimaryMapIter { map: &self, idx: 0 }
+        PrimaryMapIter { map: self, idx: 0 }
     }
 
     pub fn len(&self) -> usize {
         self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn keys(&self) -> impl Iterator<Item=K> {
@@ -112,7 +122,7 @@ macro_rules! slotmap_key {
         #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq, Default)]
         pub struct $key(pub $inner_type);
 
-        use crate::support::slotmap::Key;
+        use $crate::support::slotmap::Key;
 
         impl Key for $key {
             const NONE_VAL: Self = Self(<$inner_type>::MAX);
@@ -183,21 +193,13 @@ impl<K: Key, V: Clone> SecondaryMap<K, V> {
 
     pub fn iter(&self) -> impl Iterator<Item=(K, &V)> {
         self.values.iter().enumerate().filter_map(|(i, v)| {
-            if let Some(v) = v.as_ref() {
-                Some((K::new(i), v))
-            } else {
-                None
-            }
+            v.as_ref().map(|v| (K::new(i), v))
         })
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item=(K, &mut V)> {
         self.values.iter_mut().enumerate().filter_map(|(i, v)| {
-            if let Some(v) = v.as_mut() {
-                Some((K::new(i), v))
-            } else {
-                None
-            }
+            v.as_mut().map(|v| (K::new(i), v))
         })
     }
 
@@ -232,11 +234,6 @@ impl<K: Key, V> Index<K> for SecondaryMap<K, V> {
         assert!(index.index() < self.values.len());
         self.values[index.index()].as_ref().unwrap()
     }
-}
-
-pub struct SecondaryMapIter<'a, K: Key, V> {
-    map: &'a SecondaryMap<K, V>,
-    idx: usize,
 }
 
 #[cfg(test)]

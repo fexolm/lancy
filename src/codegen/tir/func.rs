@@ -48,7 +48,7 @@ impl<I: Inst> Func<I> {
     }
 
     pub fn get_entry_block(&self) -> Option<Block> {
-        if self.blocks.len() > 0 {
+        if !self.blocks.is_empty() {
             Some(Block::new(0))
         } else {
             None
@@ -66,7 +66,7 @@ impl<I: Inst> Func<I> {
 
 impl<I: Inst> Display for Func<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:\n", self.name)?;
+        writeln!(f, "{}:", self.name)?;
 
         for (id, data) in self.blocks.iter() {
             write!(f, "{id}")?;

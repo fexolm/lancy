@@ -1,6 +1,5 @@
-use lancy::codegen::regalloc::{RegAlloc, RegisterBinding};
+use lancy::codegen::regalloc::RegisterBinding;
 use lancy::codegen::{
-    analysis::cfg::CFG,
     isa::x64::{inst::X64Inst, regs::*},
     tir::Func,
 };
@@ -33,7 +32,7 @@ fn main() {
         block_data.push_target_inst(X64Inst::Ret { src: v3 });
     }
 
-    let cfg = CFG::compute(&func).unwrap();
+    // let cfg = CFG::compute(&func).unwrap();
 
     let mut reg_bind = RegisterBinding::new(func.get_regs_count());
     reg_bind.add(v2, RAX);

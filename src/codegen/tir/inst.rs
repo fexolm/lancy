@@ -1,9 +1,8 @@
 use smallvec::{smallvec, SmallVec};
 use std::fmt::{Display, Formatter};
 
-use crate::codegen::tir::Block;
-use crate::codegen::tir::PseudoInstruction::Arg;
 use super::Reg;
+use crate::codegen::tir::Block;
 
 pub trait Inst: Sized + Copy + Display {
     fn is_branch(&self) -> bool;
@@ -28,42 +27,33 @@ impl Display for PseudoInstruction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             PseudoInstruction::Arg { dst } => write!(f, "arg {}", reg_name(*dst)),
-            _ => todo!()
         }
     }
 }
 
 impl Inst for PseudoInstruction {
     fn is_branch(&self) -> bool {
-        match self {
-            _ => false,
-        }
+        false
     }
 
     fn is_ret(&self) -> bool {
-        match self {
-            _ => false,
-        }
+        false
     }
 
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
         match self {
             PseudoInstruction::Arg { .. } => smallvec![],
-            _ => todo!(),
         }
     }
 
     fn get_defs(&self) -> SmallVec<[Reg; 1]> {
         match self {
             PseudoInstruction::Arg { dst } => smallvec![*dst],
-            _ => todo!(),
         }
     }
 
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]> {
-        match self {
-            _ => smallvec![],
-        }
+        smallvec![]
     }
 }
 

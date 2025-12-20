@@ -1,8 +1,3 @@
-use core::fmt;
-use std::{
-    fmt::{Display, Formatter},
-    mem::size_of,
-};
 
 use smallvec::SmallVec;
 
@@ -15,8 +10,8 @@ pub struct FixedBitSet {
 
 impl FixedBitSet {
     fn new(size: usize, value: Word) -> Self {
-        use std::cmp::max;
-        let words = (size + Self::bits_in_bucket() - 1) / Self::bits_in_bucket();
+        
+        let words = size.div_ceil(Self::bits_in_bucket());
         let mut buckets = SmallVec::with_capacity(words);
         buckets.resize(words, value);
         Self { buckets }
@@ -31,7 +26,7 @@ impl FixedBitSet {
     }
 
     fn bits_in_bucket() -> usize {
-        return size_of::<Word>() * 8;
+        Word::BITS as usize
     }
 
     pub fn ones_count(&self) -> usize {
@@ -89,7 +84,7 @@ impl FixedBitSet {
         }
         let num_bucket = index / Self::bits_in_bucket();
         let bit_pos = index % Self::bits_in_bucket();
-        return self.buckets[num_bucket] & (1 << bit_pos) != 0;
+        self.buckets[num_bucket] & (1 << bit_pos) != 0
     }
 
     pub fn equals(&self, other: &FixedBitSet) -> bool {

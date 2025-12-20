@@ -1,7 +1,7 @@
 ﻿use crate::codegen::isa::x64::inst::X64Inst;
 use crate::codegen::isa::x64::regs::*;
 use crate::codegen::regalloc::{AllocatedSlot, RegAllocConfig, RegAllocResult};
-use crate::codegen::tir::{Func, Inst, Instruction, Reg};
+use crate::codegen::tir::{Func, Instruction, Reg};
 use crate::support::slotmap::Key;
 use iced_x86::code_asm::registers::*;
 use iced_x86::code_asm::{AsmRegister64, CodeAssembler};
@@ -62,7 +62,7 @@ impl<'i> FnMCWriter<'i> {
     fn choose_store_reg(&self, vreg: Reg) -> AsmRegister64 {
         match self.ra_res.coloring[vreg] {
             AllocatedSlot::Reg(r) => to_ice_reg(r),
-            AllocatedSlot::Stack(slot) => {
+            AllocatedSlot::Stack(..) => {
                 to_ice_reg(self.ra_cfg.scratch_regs[0])
             }
         }
@@ -70,7 +70,7 @@ impl<'i> FnMCWriter<'i> {
 
     fn emit_post_vreg_store(&mut self, vreg: Reg) {
         match self.ra_res.coloring[vreg] {
-            AllocatedSlot::Reg(r) => {}
+            AllocatedSlot::Reg(..) => {}
             AllocatedSlot::Stack(slot) => {
                 self.asm
                     .mov(
@@ -83,11 +83,11 @@ impl<'i> FnMCWriter<'i> {
     }
 
     fn emit_prologue(&mut self) {
-        self.asm.add(rsp, self.ra_res.frame_size as i32);
+        self.asm.add(rsp, self.ra_res.frame_size as i32).unwrap();
     }
 
     fn emit_epilogue(&mut self) {
-        self.asm.sub(rsp, self.ra_res.frame_size as i32);
+        self.asm.sub(rsp, self.ra_res.frame_size as i32).unwrap();
     }
 
     pub fn emit_fn(&mut self) -> Vec<u8> {
@@ -95,26 +95,26 @@ impl<'i> FnMCWriter<'i> {
 
         let mut labels = Vec::new();
 
-        for (block, block_data) in self.func.blocks_iter() {
+        for _ in self.func.blocks_iter() {
             labels.push(self.asm.create_label());
         }
 
         for (block, block_data) in self.func.blocks_iter() {
-            self.asm.set_label(&mut labels[block.index()]);
+            self.asm.set_label(&mut labels[block.index()]).unwrap();
             for instr in block_data.iter() {
                 match instr {
                     Instruction::Target(x64_inst) => match x64_inst {
                         X64Inst::Mov64rr { dst, src } => {
                             let src_preg = self.emit_vreg_load(*src);
                             let dst_preg = self.choose_store_reg(*dst);
-                            self.asm.mov(dst_preg, src_preg);
+                            self.asm.mov(dst_preg, src_preg).unwrap();
                             self.emit_post_vreg_store(*dst);
                         }
-                        X64Inst::Ret { src } => { /* will be emitted in the end */ }
+                        X64Inst::Ret { .. } => { /* will be emitted in the end */ }
                         X64Inst::Jmp { dst } => self.asm.jmp(labels[dst.index()]).unwrap(),
                         _ => todo!(),
                     },
-                    Instruction::Pseudo(psedo) => { /* ignore */ }
+                    Instruction::Pseudo(_) => { /* ignore */ }
                 };
             }
         }
@@ -183,15 +183,15 @@ mod tests {
         println!("{func}");
 
         let cfg = CFG::compute(&func).unwrap();
-        let mut allocatable_regs = vec![RAX, RBX, RCX, RDX];
-        let mut scratch_regs = vec![R12, R13];
+        let allocatable_regs = vec![RAX, RBX, RCX, RDX];
+        let scratch_regs = vec![R12, R13];
         let reg_alloc_config = RegAllocConfig {
             preg_count: 32,
             allocatable_regs,
             scratch_regs,
             reg_bind,
         };
-        
+
         let mut regalloc = RegAlloc::new(&func, &cfg, &reg_alloc_config);
         let regalloc_result = regalloc.run();
 

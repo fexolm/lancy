@@ -5,7 +5,7 @@ use crate::{
         analysis::{cfg::CFG, LiveRange, ProgramPoint},
         tir::{Func, Inst, Reg},
     },
-    support::{bitset::FixedBitSet, slotmap::Key},
+    support::bitset::FixedBitSet,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -70,16 +70,12 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
         }
     }
 
-    fn lookup_available_reg(&mut self, cur: ProgramPoint) -> Option<Reg> {
-        if let Some(reg) = self.free_regs.iter_ones().next() {
-            Some(reg as Reg)
-        } else {
-            None
-        }
+    fn lookup_available_reg(&mut self) -> Option<Reg> {
+        self.free_regs.iter_ones().next().map(|reg| reg as Reg)
     }
 
     pub fn run(&mut self) -> RegAllocResult {
-        let live_ranges: LiveRanges = LiveRanges::compute(&self.func, &self.cfg);
+        let live_ranges: LiveRanges = LiveRanges::compute(self.func, self.cfg);
         let mut sorted_live_ranges: Vec<(Reg, &LiveRange)> = live_ranges.iter().collect();
         sorted_live_ranges.sort_by_key(|(_, range)| range.start);
 
@@ -108,7 +104,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
                 continue;
             }
 
-            if let Some(preg) = self.lookup_available_reg(lr.start) {
+            if let Some(preg) = self.lookup_available_reg() {
                 self.free_regs.del(preg as usize);
                 self.expire_range.insert((lr.end, preg));
                 coloring.set(*vreg, AllocatedSlot::Reg(preg));
@@ -183,8 +179,8 @@ mod tests {
         println!("{func}");
 
         let cfg = CFG::compute(&func).unwrap();
-        let mut allocatable_regs = vec![RAX, RBX, RCX, RDX];
-        let mut scratch_regs = vec![R12, R13];
+        let allocatable_regs = vec![RAX, RBX, RCX, RDX];
+        let scratch_regs = vec![R12, R13];
         let reg_alloc_config = RegAllocConfig {
             preg_count: 32,
             allocatable_regs,

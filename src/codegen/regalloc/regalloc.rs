@@ -2,14 +2,12 @@ use crate::codegen::analysis::LiveRanges;
 use crate::support::slotmap::SecondaryMap;
 use crate::{
     codegen::{
-        analysis::{LiveRange, ProgramPoint, cfg::CFG},
+        analysis::{cfg::CFG, LiveRange, ProgramPoint},
         tir::{Func, Inst, Reg},
     },
     support::{bitset::FixedBitSet, slotmap::Key},
 };
-use std::collections::{BTreeSet, HashMap, LinkedList};
-use std::ptr::null;
-use crate::codegen::tir::Block;
+use std::collections::{BTreeSet, HashMap};
 
 pub type StackSlot = u32;
 
@@ -21,22 +19,10 @@ pub enum AllocatedSlot {
 
 pub struct RegAllocResult {
     pub coloring: SecondaryMap<Reg, AllocatedSlot>,
-    pub frame_layout: SecondaryMap<StackSlot, usize>
+    pub frame_layout: SecondaryMap<StackSlot, usize>,
+    pub frame_size: u32,
 }
 
-impl RegAllocResult {
-    pub fn new(
-        coloring: SecondaryMap<Reg, AllocatedSlot>,
-        frame_layout: SecondaryMap<StackSlot, usize>,
-    ) -> Self {
-        Self {
-            coloring,
-            frame_layout,
-        }
-    }
-}
-
-#[derive(Clone)]
 pub struct RegAllocConfig {
     pub preg_count: usize,
     pub allocatable_regs: Vec<Reg>,
@@ -48,15 +34,14 @@ pub struct RegAlloc<'i, I: Inst> {
     func: &'i Func<I>,
     cfg: &'i CFG,
     free_regs: FixedBitSet,
-    scratch_regs: Vec<Reg>,
     last_preg_use: SecondaryMap<Reg, Reg>, // Physical register -> Virtual register
-    config: RegAllocConfig,
+    config: &'i RegAllocConfig,
     expire_range: BTreeSet<(ProgramPoint, Reg)>,
     stack_slots: u32,
 }
 
 impl<'i, I: Inst> RegAlloc<'i, I> {
-    pub fn new(func: &'i Func<I>, cfg: &'i CFG, config: RegAllocConfig) -> Self {
+    pub fn new(func: &'i Func<I>, cfg: &'i CFG, config: &'i RegAllocConfig) -> Self {
         let mut free_regs = FixedBitSet::zeroes(config.preg_count);
 
         for preg in &config.allocatable_regs {
@@ -67,7 +52,6 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
             func,
             cfg,
             free_regs,
-            scratch_regs: config.scratch_regs.clone(),
             last_preg_use: SecondaryMap::new(config.preg_count),
             config,
             expire_range: BTreeSet::new(),
@@ -136,7 +120,7 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
             }
         }
 
-        RegAllocResult::new(coloring, frame_layout)
+        RegAllocResult { coloring, frame_layout, frame_size: self.stack_slots * 8 }
     }
 }
 
@@ -146,8 +130,8 @@ mod tests {
     use crate::codegen::isa::x64::inst::X64Inst;
     use crate::codegen::isa::x64::regs::*;
     use crate::codegen::regalloc::{RegAlloc, RegAllocConfig};
-    use crate::codegen::tir::{BlockData, Func, PseudoInstruction};
-    use std::collections::{HashMap, LinkedList};
+    use crate::codegen::tir::{Func, PseudoInstruction};
+    use std::collections::HashMap;
 
     #[test]
     fn simple_test() {
@@ -207,7 +191,7 @@ mod tests {
             scratch_regs,
             reg_bind,
         };
-        let mut regalloc = RegAlloc::new(&func, &cfg, reg_alloc_config);
+        let mut regalloc = RegAlloc::new(&func, &cfg, &reg_alloc_config);
         let res = regalloc.run();
 
         for (vir_reg, phys_reg) in res.coloring.iter() {

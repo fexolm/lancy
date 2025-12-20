@@ -1,4 +1,4 @@
-use lancy::codegen::regalloc::RegisterBinding;
+use lancy::codegen::regalloc::{RegAlloc, RegisterBinding};
 use lancy::codegen::{
     analysis::cfg::CFG,
     isa::x64::{inst::X64Inst, regs::*},
@@ -41,8 +41,7 @@ fn main() {
 
     println!("{func}");
 
-    // let analysis = LivenessAnalysis::compute(&func, &cfg);
-    // let mut regalloc = RegAlloc::new(&func, &cfg, &analysis);
+    // let mut regalloc = RegAlloc::new(&func, &cfg);
     // let regalloc_intervals = regalloc.run();
     // apply_regalloc_result(&mut func, regalloc_intervals);
 

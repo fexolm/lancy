@@ -35,7 +35,7 @@ impl DomTree {
         self.nodes.get_mut(entry_block).unwrap().rpo = 2 * STRIDE;
 
         for (rpo, &block) in reverse_postorder.iter().enumerate() {
-            self.nodes.add(block, Node {
+            self.nodes.set(block, Node {
                 idom: self.compute_idom(block, cfg).into(),
                 rpo: (rpo as u32 + 3) * STRIDE,
             });

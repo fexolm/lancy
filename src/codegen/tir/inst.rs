@@ -2,7 +2,7 @@ use smallvec::{smallvec, SmallVec};
 use std::fmt::{Display, Formatter};
 
 use crate::codegen::tir::Block;
-
+use crate::codegen::tir::PseudoInstruction::Arg;
 use super::Reg;
 
 pub trait Inst: Sized + Copy + Display {
@@ -26,7 +26,10 @@ pub enum PseudoInstruction {
 
 impl Display for PseudoInstruction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            PseudoInstruction::Arg { dst } => write!(f, "arg {}", reg_name(*dst)),
+            _ => todo!()
+        }
     }
 }
 
@@ -116,6 +119,6 @@ impl<I: Inst> Inst for Instruction<I> {
     }
 }
 
-pub fn reg_name<I: Inst>(reg: Reg) -> String {
+pub fn reg_name(reg: Reg) -> String {
     format!("v{}", reg)
 }

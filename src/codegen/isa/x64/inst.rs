@@ -162,7 +162,7 @@ impl Inst for X64Inst {
 }
 
 fn reg_name(reg: Reg) -> String {
-    tir::reg_name::<X64Inst>(reg)
+    tir::reg_name(reg)
 }
 
 impl Display for X64Inst {

@@ -128,7 +128,7 @@ macro_rules! slotmap_key {
     };
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 pub struct SecondaryMap<K: Key, V> {
     values: Vec<Option<V>>,
     phantom: PhantomData<K>,
@@ -148,9 +148,13 @@ impl<K: Key, V: Clone> SecondaryMap<K, V> {
         }
     }
 
-    pub fn add(&mut self, key: K, val: V) -> K {
+    pub fn set(&mut self, key: K, val: V) -> K {
         self.values[key.index()] = Some(val);
         key
+    }
+
+    pub fn remove(&mut self, key: K) {
+        self.values[key.index()] = None;
     }
 
     pub fn contains(&self, key: K) -> bool {
@@ -260,7 +264,7 @@ mod tests {
     fn test_secondary_map() {
         let mut map = SecondaryMap::new(10);
         let key = K::new(0);
-        map.add(key, "value");
+        map.set(key, "value");
         assert_eq!(map[key], "value");
     }
 
@@ -279,7 +283,7 @@ mod tests {
     #[test]
     fn test_secondary_map_iter() {
         let mut map = SecondaryMap::new(10);
-        map.add(K::new(0), "value");
+        map.set(K::new(0), "value");
 
         let mut iter = map.iter();
         assert_eq!(iter.next(), Some((K::new(0), &"value")));
@@ -290,7 +294,7 @@ mod tests {
     fn test_secondary_map_iter_mut() {
         let mut map = SecondaryMap::new(10);
         let key = K::new(0);
-        map.add(key, "value");
+        map.set(key, "value");
 
         let mut iter = map.iter_mut();
         assert_eq!(iter.next(), Some((K::new(0), &mut "value")));

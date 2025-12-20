@@ -43,7 +43,7 @@ struct LivenessAnalysis {
 
 #[derive(Default)]
 pub struct LiveRanges {
-    ranges: SecondaryMap<Reg, LiveRange>,
+    pub(crate) ranges: SecondaryMap<Reg, LiveRange>,
 }
 
 impl UseDefs {
@@ -142,6 +142,15 @@ impl LivenessAnalysis {
 }
 
 impl LiveRanges {
+
+    pub fn iter(&self) -> impl Iterator<Item=(Reg, &LiveRange)> {
+        self.ranges.iter()
+    }
+
+    pub fn size(&self) -> usize {
+        self.ranges.capacity()
+    }
+
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
         let entry = if let Some(entry) = func.get_entry_block() {
             entry

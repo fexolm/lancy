@@ -1,7 +1,7 @@
-use crate::codegen::tir::reverse_post_order;
 use crate::{
-    codegen::tir::{Block, Inst, CFG},
-    support::slotmap::{Key, SecondaryMap, SecondaryMapExt},
+    codegen::analysis::cfg::{reverse_post_order, CFG},
+    codegen::tir::{Block, Inst},
+    support::slotmap::{Key, SecondaryMap},
 };
 
 #[derive(Clone, Default)]
@@ -16,9 +16,9 @@ pub struct DomTree {
 
 impl DomTree {
     pub fn compute(cfg: &CFG) -> Self {
-        let mut res = Self {
-            nodes: SecondaryMap::with_default(cfg.blocks_count()),
-        };
+        let mut nodes = SecondaryMap::new(cfg.blocks_count());
+        nodes.fill(Node::default());
+        let mut res = Self { nodes };
         res.compute_domtree(cfg);
         res
     }
@@ -32,13 +32,13 @@ impl DomTree {
             None => return,
         };
 
-        self.nodes[entry_block].rpo = 2 * STRIDE;
+        self.nodes.get_mut(entry_block).unwrap().rpo = 2 * STRIDE;
 
         for (rpo, &block) in reverse_postorder.iter().enumerate() {
-            self.nodes[block] = Node {
+            self.nodes.set(block, Node {
                 idom: self.compute_idom(block, cfg).into(),
                 rpo: (rpo as u32 + 3) * STRIDE,
-            }
+            });
         }
 
         let mut changed = true;
@@ -48,7 +48,7 @@ impl DomTree {
             for block in reverse_postorder.iter() {
                 let new_idom = self.compute_idom(*block, cfg).into();
                 if self.nodes[*block].idom != new_idom {
-                    self.nodes[*block].idom = new_idom;
+                    self.nodes.get_mut(*block).unwrap().idom = new_idom;
                     changed = true;
                 }
             }

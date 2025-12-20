@@ -13,6 +13,7 @@ pub struct Func<I: Inst> {
 }
 
 impl<I: Inst> Func<I> {
+    #[must_use]
     pub fn new(name: String) -> Self {
         Func {
             name,
@@ -26,13 +27,14 @@ impl<I: Inst> Func<I> {
     }
 
     pub fn add_empty_block(&mut self) -> Block {
-        self.blocks.insert(Default::default())
+        self.blocks.insert(BlockData::default())
     }
 
     pub fn get_block_data_mut(&mut self, block: Block) -> &mut BlockData<I> {
         &mut self.blocks[block]
     }
 
+    #[must_use]
     pub fn get_block_data(&self, block: Block) -> &BlockData<I> {
         &self.blocks[block]
     }
@@ -43,15 +45,17 @@ impl<I: Inst> Func<I> {
         res
     }
 
+    #[must_use]
     pub fn get_regs_count(&self) -> usize {
         self.regs_count as usize
     }
 
+    #[must_use]
     pub fn get_entry_block(&self) -> Option<Block> {
-        if !self.blocks.is_empty() {
-            Some(Block::new(0))
-        } else {
+        if self.blocks.is_empty() {
             None
+        } else {
+            Some(Block::new(0))
         }
     }
 
@@ -59,6 +63,7 @@ impl<I: Inst> Func<I> {
         self.blocks.iter()
     }
 
+    #[must_use]
     pub fn blocks_count(&self) -> usize {
         self.blocks.len()
     }

@@ -67,8 +67,8 @@ impl UseDefs {
             let uses = inst.get_uses();
             let defs = inst.get_defs();
 
-            let block_defs = &mut self.defs.get_mut(block).unwrap();
-            let block_uses = &mut self.uses.get_mut(block).unwrap();
+            let block_defs = self.defs.get_mut(block).unwrap();
+            let block_uses = self.uses.get_mut(block).unwrap();
 
             for r in uses {
                 let id = r as usize;
@@ -146,10 +146,12 @@ impl LiveRanges {
         self.ranges.iter()
     }
 
+    #[must_use] 
     pub fn size(&self) -> usize {
         self.ranges.capacity()
     }
 
+    #[must_use] 
     pub fn compute<I: Inst>(func: &Func<I>, cfg: &CFG) -> Self {
         if let Some(entry) = func.get_entry_block() {
             entry

@@ -66,8 +66,8 @@ pub enum Instruction<I: Inst> {
 impl<I: Inst> Display for Instruction<I> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Instruction::Pseudo(inst) => write!(f, "{}", inst),
-            Instruction::Target(inst) => write!(f, "{}", inst),
+            Instruction::Pseudo(inst) => write!(f, "{inst}"),
+            Instruction::Target(inst) => write!(f, "{inst}"),
         }
     }
 }
@@ -109,6 +109,7 @@ impl<I: Inst> Inst for Instruction<I> {
     }
 }
 
+#[must_use] 
 pub fn reg_name(reg: Reg) -> String {
-    format!("v{}", reg)
+    format!("v{reg}")
 }

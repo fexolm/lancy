@@ -1,4 +1,3 @@
-
 use smallvec::SmallVec;
 
 type Word = u64;
@@ -10,17 +9,18 @@ pub struct FixedBitSet {
 
 impl FixedBitSet {
     fn new(size: usize, value: Word) -> Self {
-        
         let words = size.div_ceil(Self::bits_in_bucket());
         let mut buckets = SmallVec::with_capacity(words);
         buckets.resize(words, value);
         Self { buckets }
     }
 
+    #[must_use]
     pub fn zeroes(size: usize) -> Self {
         Self::new(size, 0)
     }
 
+    #[must_use]
     pub fn ones(size: usize) -> Self {
         Self::new(size, Word::MAX)
     }
@@ -29,6 +29,7 @@ impl FixedBitSet {
         Word::BITS as usize
     }
 
+    #[must_use]
     pub fn ones_count(&self) -> usize {
         self.buckets.iter().map(|w| w.count_ones() as usize).sum()
     }
@@ -46,7 +47,8 @@ impl FixedBitSet {
             *bucket |= other.buckets[i];
         }
     }
-    
+
+    #[must_use]
     pub fn is_superset_of(&self, other: &FixedBitSet) -> bool {
         debug_assert_eq!(self.buckets.len(), other.buckets.len());
         for (i, &bucket) in self.buckets.iter().enumerate() {
@@ -78,6 +80,7 @@ impl FixedBitSet {
         self.buckets[num_bucket] &= !(1 << bit_pos);
     }
 
+    #[must_use]
     pub fn has(&self, index: usize) -> bool {
         if index >= self.buckets.len() * 32 {
             return false;
@@ -87,6 +90,7 @@ impl FixedBitSet {
         self.buckets[num_bucket] & (1 << bit_pos) != 0
     }
 
+    #[must_use]
     pub fn equals(&self, other: &FixedBitSet) -> bool {
         if self.buckets.len() != other.buckets.len() {
             return false;
@@ -99,7 +103,7 @@ impl FixedBitSet {
         true
     }
 
-    pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn iter_ones(&self) -> impl Iterator<Item=usize> + '_ {
         self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
             (0..Self::bits_in_bucket())
                 .filter(move |j| bucket & ((1 as Word) << j) != 0)
@@ -107,7 +111,7 @@ impl FixedBitSet {
         })
     }
 
-    pub fn iter_zeroes(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn iter_zeroes(&self) -> impl Iterator<Item=usize> + '_ {
         self.buckets.iter().enumerate().flat_map(|(i, &bucket)| {
             (0..Self::bits_in_bucket())
                 .filter(move |j| bucket & ((1 as Word) << j) == 0)
@@ -129,7 +133,7 @@ mod tests {
     fn test_new_and_len() {
         let bs = FixedBitSet::zeroes(100);
         assert_eq!(bs.ones_count(), 0);
-        assert_eq!(bs.buckets.len(), (100 + 31) / 32);
+        assert_eq!(bs.buckets.len(), 100_usize.div_ceil(32));
     }
 
     #[test]

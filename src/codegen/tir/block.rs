@@ -25,12 +25,13 @@ pub struct BlockData<I: Inst> {
 impl<I: Inst> Default for BlockData<I> {
     fn default() -> Self {
         Self {
-            insts: Default::default(),
+            insts: Vec::default(),
         }
     }
 }
 
 impl<I: Inst> BlockData<I> {
+    #[must_use]
     pub fn new() -> Self {
         BlockData { insts: Vec::new() }
     }
@@ -39,9 +40,10 @@ impl<I: Inst> BlockData<I> {
         self.insts.push(Instruction::Target(inst));
     }
     pub fn push_pseudo_inst(&mut self, inst: PseudoInstruction) {
-        self.insts.push(Instruction::Pseudo(inst)); 
+        self.insts.push(Instruction::Pseudo(inst));
     }
 
+    #[must_use]
     pub fn get_terminator(&self) -> Option<Instruction<I>> {
         if let Some(inst) = self.insts.last()
             && inst.is_term()
@@ -52,14 +54,16 @@ impl<I: Inst> BlockData<I> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Instruction<I>> {
+    pub fn iter(&self) -> impl Iterator<Item=&Instruction<I>> {
         self.insts.iter()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.insts.len()
     }
-    
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.insts.is_empty()
     }

@@ -15,6 +15,7 @@ pub struct DomTree {
 }
 
 impl DomTree {
+    #[must_use]
     pub fn compute(cfg: &CFG) -> Self {
         let mut nodes = SecondaryMap::new(cfg.blocks_count());
         nodes.fill(Node::default());
@@ -45,7 +46,7 @@ impl DomTree {
         while changed {
             changed = false;
 
-            for block in reverse_postorder.iter() {
+            for block in reverse_postorder {
                 let new_idom = self.compute_idom(*block, cfg).into();
                 if self.nodes[*block].idom != new_idom {
                     self.nodes.get_mut(*block).unwrap().idom = new_idom;
@@ -76,18 +77,23 @@ impl DomTree {
             let a_rpo = self.nodes[a].rpo;
             let b_rpo = self.nodes[b].rpo;
 
-            if a_rpo < b_rpo {
-                let idom = self.nodes[b].idom.unwrap();
-                b = idom;
-            } else if a_rpo > b_rpo {
-                let idom = self.nodes[a].idom.unwrap();
-                a = idom;
-            } else {
-                return a;
+            match a_rpo.cmp(&b_rpo) {
+                std::cmp::Ordering::Less => {
+                    let idom = self.nodes[b].idom.unwrap();
+                    b = idom;
+                }
+                std::cmp::Ordering::Equal => {
+                    let idom = self.nodes[a].idom.unwrap();
+                    a = idom;
+                }
+                std::cmp::Ordering::Greater => {
+                    return a;
+                }
             }
         }
     }
 
+    #[must_use]
     pub fn dominates(&self, a: Block, mut b: Block) -> bool {
         if a == b {
             return true;

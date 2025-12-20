@@ -1,9 +1,9 @@
 ﻿use crate::codegen::isa::x64::inst::X64Inst;
-use crate::codegen::isa::x64::regs::*;
+use crate::codegen::isa::x64::regs::{R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP};
 use crate::codegen::regalloc::{AllocatedSlot, RegAllocConfig, RegAllocResult};
 use crate::codegen::tir::{Func, Instruction, Reg};
 use crate::support::slotmap::Key;
-use iced_x86::code_asm::registers::*;
+use iced_x86::code_asm::registers::{r10, r11, r12, r13, r14, r15, r8, r9, rax, rbp, rbx, rcx, rdi, rdx, rsi, rsp};
 use iced_x86::code_asm::{AsmRegister64, CodeAssembler};
 
 fn to_ice_reg(r: Reg) -> AsmRegister64 {
@@ -35,6 +35,7 @@ pub struct FnMCWriter<'i> {
 }
 
 impl<'i> FnMCWriter<'i> {
+    #[must_use]
     pub fn new(func: &'i Func<X64Inst>, ra_cfg: &'i RegAllocConfig, ra_res: RegAllocResult) -> Self {
         Self {
             asm: CodeAssembler::new(64).unwrap(),
@@ -115,7 +116,7 @@ impl<'i> FnMCWriter<'i> {
                         _ => todo!(),
                     },
                     Instruction::Pseudo(_) => { /* ignore */ }
-                };
+                }
             }
         }
         self.emit_epilogue();
@@ -197,7 +198,7 @@ mod tests {
 
         let mut writer = FnMCWriter::new(&func, &reg_alloc_config, regalloc_result);
         for b in &writer.emit_fn() {
-            print!("{:02X} ", b);
+            print!("{b:02X} ");
         }
         assert_eq!(true, true);
     }

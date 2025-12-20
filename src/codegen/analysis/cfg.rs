@@ -16,6 +16,7 @@ pub struct CFG {
 }
 
 impl CFG {
+    #[must_use] 
     pub fn new(entry: Block, size: usize) -> Self {
         let mut nodes = SecondaryMap::new(size);
         nodes.fill(CFGNode::default());
@@ -51,23 +52,28 @@ impl CFG {
         self.nodes.get_mut(predecessor).unwrap().successors.push(successor);
     }
 
+    #[must_use] 
     pub fn preds(&self, block: Block) -> &[Block] {
         &self.nodes[block].predecessors
     }
 
+    #[must_use] 
     pub fn succs(&self, block: Block) -> &[Block] {
         &self.nodes[block].successors
     }
 
+    #[must_use] 
     pub fn blocks_count(&self) -> usize {
         self.nodes.capacity()
     }
 
+    #[must_use] 
     pub fn get_entry_block(&self) -> Block {
         self.entry
     }
 }
 
+#[must_use] 
 pub fn reverse_post_order(cfg: &CFG) -> Vec<Block> {
     let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
 

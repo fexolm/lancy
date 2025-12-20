@@ -27,6 +27,7 @@ impl<K: Key, V> Default for PrimaryMap<K, V> {
 }
 
 impl<K: Key, V> PrimaryMap<K, V> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             values: Vec::new(),
@@ -39,14 +40,17 @@ impl<K: Key, V> PrimaryMap<K, V> {
         K::new(self.values.len() - 1)
     }
 
+    #[must_use]
     pub fn iter(&self) -> PrimaryMapIter<'_, K, V> {
         PrimaryMapIter { map: self, idx: 0 }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -98,11 +102,11 @@ macro_rules! impl_slotmap_key {
             const NONE_VAL: Self = <$type>::MAX;
 
             fn new(v: usize) -> Self {
-                v as $type
+                <$type>::try_from(v).unwrap()
             }
 
             fn index(&self) -> usize {
-                *self as usize
+                usize::try_from(*self).unwrap()
             }
         }
     };
@@ -153,7 +157,7 @@ impl<K: Key, V: Clone> SecondaryMap<K, V> {
     }
 
     pub fn fill(&mut self, val: V) {
-        for v in self.values.iter_mut() {
+        for v in &mut self.values {
             *v = Some(val.clone());
         }
     }
@@ -187,6 +191,7 @@ impl<K: Key, V: Clone> SecondaryMap<K, V> {
         }
     }
 
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.values.len()
     }

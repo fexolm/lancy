@@ -35,6 +35,7 @@ pub struct Mem {
 }
 
 impl Mem {
+    #[must_use] 
     pub fn get_uses(&self) -> SmallVec<[Reg; 2]> {
         if let Some(idx) = self.index {
             smallvec![self.reg, idx]
@@ -111,7 +112,7 @@ impl Inst for X64Inst {
     }
     fn get_defs(&self) -> SmallVec<[Reg; 1]> {
         match self {
-            X64Inst::Ret { .. } => smallvec![],
+            X64Inst::Ret { .. } | X64Inst::Jmp { .. } | X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Jmp { .. } => smallvec![],
             X64Inst::CondJmp { .. } => smallvec![],
             X64Inst::Mov64rm { dst, src } => smallvec![*dst],

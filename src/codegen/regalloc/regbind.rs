@@ -6,11 +6,13 @@ pub struct RegisterBinding {
 }
 
 impl RegisterBinding {
+    #[must_use] 
     pub fn new(reg_count: usize) -> Self {
         let vreg_to_preg = SecondaryMap::new(reg_count);
         Self { vreg_to_preg }
     }
     
+    #[must_use] 
     pub fn vreg_to_preg(&self, vreg: Reg) -> Reg  {
         self.vreg_to_preg[vreg]
     }

@@ -41,6 +41,7 @@ pub struct RegAlloc<'i, I: Inst> {
 }
 
 impl<'i, I: Inst> RegAlloc<'i, I> {
+    #[must_use] 
     pub fn new(func: &'i Func<I>, cfg: &'i CFG, config: &'i RegAllocConfig) -> Self {
         let mut free_regs = FixedBitSet::zeroes(config.preg_count);
 
@@ -79,14 +80,14 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
         let mut sorted_live_ranges: Vec<(Reg, &LiveRange)> = live_ranges.iter().collect();
         sorted_live_ranges.sort_by_key(|(_, range)| range.start);
 
-        for (key, range) in sorted_live_ranges.iter() {
+        for (key, range) in &sorted_live_ranges {
             println!("{:?}: {:?}..{:?}", key, range.start, range.end);
         }
 
         let mut coloring: SecondaryMap<Reg, AllocatedSlot> =
             SecondaryMap::new(self.func.get_regs_count()); // (Virtual register, Physical Register)
         let mut frame_layout: SecondaryMap<StackSlot, usize> = SecondaryMap::new(self.func.get_regs_count());
-        for (vreg, lr) in sorted_live_ranges.iter() {
+        for (vreg, lr) in &sorted_live_ranges {
             self.expire(lr.start);
 
             if self.config.reg_bind.contains_key(vreg) {
@@ -191,11 +192,11 @@ mod tests {
         let res = regalloc.run();
 
         for (vir_reg, phys_reg) in res.coloring.iter() {
-            println!("v{:?}->{:?}", vir_reg, phys_reg);
+            println!("v{vir_reg:?}->{phys_reg:?}");
         }
 
         for (stack_slot, offest) in res.frame_layout.iter() {
-            println!("slot {:?} offset {:?}", stack_slot, offest);
+            println!("slot {stack_slot:?} offset {offest:?}");
         }
 
         assert_eq!(true, true);

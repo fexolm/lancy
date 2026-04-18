@@ -36,7 +36,7 @@ impl CFG {
                 if term.is_branch() {
                     let targets = term.get_branch_targets();
                     for t in targets {
-                        cfg.add_edge(t, block);
+                        cfg.add_edge(block, t);
                     }
                 }
             } else {
@@ -47,9 +47,12 @@ impl CFG {
         Ok(cfg)
     }
 
-    pub fn add_edge(&mut self, successor: Block, predecessor: Block) {
-        self.nodes.get_mut(successor).unwrap().predecessors.push(predecessor);
-        self.nodes.get_mut(predecessor).unwrap().successors.push(successor);
+    /// Add a directed edge `from → to`. Updates both the predecessor list of
+    /// `to` (which gains `from`) and the successor list of `from` (which
+    /// gains `to`).
+    pub fn add_edge(&mut self, from: Block, to: Block) {
+        self.nodes.get_mut(to).unwrap().predecessors.push(from);
+        self.nodes.get_mut(from).unwrap().successors.push(to);
     }
 
     #[must_use] 
@@ -73,31 +76,40 @@ impl CFG {
     }
 }
 
-#[must_use] 
+/// Reverse post-order traversal of the CFG starting from the entry block.
+///
+/// The returned vector has the property that every block appears after all
+/// its non-back-edge predecessors — this makes it the standard iteration
+/// order for forward dataflow analyses and the natural block layout order.
+///
+/// Implemented iteratively via a work-stack with a `processed` flag: on
+/// first visit we push self (with processed=true) plus successors (with
+/// processed=false); when we pop with processed=true all descendants have
+/// already been emitted, so this is the post-order step. Reversing the
+/// accumulated post-order gives RPO.
+#[must_use]
 pub fn reverse_post_order(cfg: &CFG) -> Vec<Block> {
     let mut visited = FixedBitSet::zeroes(cfg.blocks_count());
-
-    let mut stack = Vec::new();
-    let entry = cfg.get_entry_block();
-    stack.push(entry);
-
-    let mut rpo = Vec::with_capacity(cfg.blocks_count());
-
-    while let Some(block) = stack.pop() {
+    let mut post: Vec<Block> = Vec::with_capacity(cfg.blocks_count());
+    let mut stack: Vec<(Block, bool)> = vec![(cfg.get_entry_block(), false)];
+    while let Some((block, processed)) = stack.pop() {
+        if processed {
+            post.push(block);
+            continue;
+        }
         if visited.has(block.index()) {
             continue;
         }
         visited.add(block.index());
-
-        rpo.push(block);
-
+        stack.push((block, true));
         for &succ in cfg.succs(block) {
             if !visited.has(succ.index()) {
-                stack.push(succ);
+                stack.push((succ, false));
             }
         }
     }
-    rpo
+    post.reverse();
+    post
 }
 
 #[cfg(test)]
@@ -113,8 +125,8 @@ mod tests {
         let b1 = Block::new(1);
         let b2 = Block::new(2);
 
-        cfg.add_edge(b1, b0);
-        cfg.add_edge(b2, b1);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b1, b2);
 
         assert_eq!(cfg.succs(b0), &[b1]);
         assert_eq!(cfg.preds(b1), &[b0]);
@@ -132,9 +144,9 @@ mod tests {
         let b2 = Block::new(2);
         let b3 = Block::new(3);
 
-        cfg.add_edge(b1, b0);
-        cfg.add_edge(b2, b0);
-        cfg.add_edge(b3, b0);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b0, b2);
+        cfg.add_edge(b0, b3);
 
         let mut succs = cfg.succs(b0).to_vec();
         succs.sort();
@@ -155,5 +167,44 @@ mod tests {
         assert!(cfg.preds(b0).is_empty());
         assert!(cfg.succs(b1).is_empty());
         assert!(cfg.preds(b1).is_empty());
+    }
+
+    #[test]
+    fn rpo_has_every_block_after_all_non_back_edge_predecessors() {
+        // Diamond: 0 → {1, 2} → 3. In RPO, 0 must come first, 3 last, and
+        // both 1 and 2 must come strictly between. This is the defining
+        // property of RPO on an acyclic CFG.
+        let mut cfg = CFG::new(Block::new(0), 4);
+        let [b0, b1, b2, b3] = [0, 1, 2, 3].map(Block::new);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b0, b2);
+        cfg.add_edge(b1, b3);
+        cfg.add_edge(b2, b3);
+
+        let rpo = reverse_post_order(&cfg);
+        assert_eq!(rpo.len(), 4);
+        let pos = |b: Block| rpo.iter().position(|&x| x == b).unwrap();
+        assert!(pos(b0) < pos(b1));
+        assert!(pos(b0) < pos(b2));
+        assert!(pos(b1) < pos(b3));
+        assert!(pos(b2) < pos(b3));
+    }
+
+    #[test]
+    fn rpo_over_a_back_edge_still_visits_loop_header_before_body() {
+        // 0 → 1 → 2 → 3, with back edge 3 → 1. Loop header `1` must still
+        // come before `2` and `3` in RPO; the back edge doesn't re-order.
+        let mut cfg = CFG::new(Block::new(0), 4);
+        let [b0, b1, b2, b3] = [0, 1, 2, 3].map(Block::new);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b1, b2);
+        cfg.add_edge(b2, b3);
+        cfg.add_edge(b3, b1);
+
+        let rpo = reverse_post_order(&cfg);
+        let pos = |b: Block| rpo.iter().position(|&x| x == b).unwrap();
+        assert!(pos(b0) < pos(b1));
+        assert!(pos(b1) < pos(b2));
+        assert!(pos(b2) < pos(b3));
     }
 }

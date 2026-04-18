@@ -46,8 +46,9 @@ See `docs/ARCHITECTURE.md` for the full design, `docs/ROADMAP.md` for the phased
 
 Generic (target-neutral):
 - `src/codegen/tir/` — target-level IR: `Func`, `Block`, `Inst` trait, `PseudoInstruction`.
-- `src/codegen/analysis/` — CFG, liveness, dominance. All generic over `I: Inst`.
-- `src/codegen/regalloc/` — linear-scan register allocator. Generic over `I: Inst`.
+- `src/codegen/analysis/` — CFG, dominance, `BlockLayout` (flat program points), multi-segment liveness. All generic over `I: Inst`.
+- `src/codegen/passes.rs` — trait-level interfaces for swappable passes (`AbiLowering`).
+- `src/codegen/regalloc/` — `RegAllocator` trait + `LinearScan` implementation (Wimmer-Franz active/inactive sets over multi-segment ranges, Copy-hint coalescing, pre-bind eviction, farthest-endpoint spill, live-range splitting on eviction with `SplitMove` store injection). Generic over `I: Inst`.
 - `src/codegen/jit/` — `Module`: mmap + mprotect + typed entry-point. ISA-agnostic.
 
 x86-64 (everything the ISA touches lives under one roof):
@@ -55,10 +56,10 @@ x86-64 (everything the ISA touches lives under one roof):
 - `src/codegen/isa/x64/regs.rs` — register constants.
 - `src/codegen/isa/x64/sysv.rs` — SysV AMD64 constants + `SysVAmd64` handle.
 - `src/codegen/isa/x64/builder.rs` — `FuncBuilder` (v0 frontend emitting `X64Inst`).
-- `src/codegen/isa/x64/passes/abi_lower.rs` — `Arg`/`Return` → pinned shims + Copy/RawRet.
-- `src/codegen/isa/x64/passes/pseudo_cleanup.rs` — `Arg`/`Copy` → target MOV or elide.
-- `src/codegen/isa/x64/mc/emit_mc.rs` — iced-x86 backed MC emitter, prologue/epilogue.
+- `src/codegen/isa/x64/passes/abi_lower.rs` — `SysVAmd64Lowering` implements `AbiLowering<X64Inst>`: `Arg`/`Return` → pinned shims + Copy/RawRet.
+- `src/codegen/isa/x64/mc/emit_mc.rs` — iced-x86 backed MC emitter, prologue/epilogue. Consumes regalloc assignments per program point, erases `Arg` pseudos, lowers `Copy` pseudos inline (coalesce or MOV), injects `SplitMove` stores at live-range-split points.
 - `src/codegen/isa/x64/pipeline.rs` — `compile` / `jit` glue.
+- `src/codegen/isa/x64/fuzz.rs` (cfg(test)) — differential fuzz harness: randomized program generator + JIT-vs-oracle comparison.
 
 Infra:
 - `src/support/` — slotmap, bitset.
@@ -104,7 +105,8 @@ Current gaps (roughly ordered by friction):
   callee-saved requires the emitter's prologue to save any callee-saved regs
   the allocator picks — the save/restore mechanism is already in place for
   the two callee-saved scratch regs.
-- `regalloc/fast.rs` does not yet coalesce `Copy` — all copies survive as MOVs unless source and dest happen to land on the same preg.
+- Live-range splitting is one-way only: a vreg can go Reg → Stack on eviction (with a `SplitMove` store) but never reloads back into a preg. Truly optimal splitting would split symmetrically (Stack → Reg reload), requiring reload moves in the emitter and a more sophisticated heuristic to decide *where* to reload.
+- Copy coalescing is local, hint-based only (pick src's preg if free at dst's def). No iterated / conservative coalescing.
 - No JIT symbol resolution (`CallPseudo` → extern C). Windows support unimplemented.
 
 ## Style

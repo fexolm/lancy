@@ -125,9 +125,9 @@ mod tests {
         let b2 = Block(2);
         let b3 = Block(3);
 
-        cfg.add_edge(b1, b0);
-        cfg.add_edge(b2, b1);
-        cfg.add_edge(b3, b1);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b1, b2);
+        cfg.add_edge(b1, b3);
 
         cfg
     }
@@ -145,10 +145,10 @@ mod tests {
         let b2 = Block(2);
         let b3 = Block(3);
 
-        cfg.add_edge(b1, b0);
-        cfg.add_edge(b2, b0);
-        cfg.add_edge(b3, b1);
-        cfg.add_edge(b3, b2);
+        cfg.add_edge(b0, b1);
+        cfg.add_edge(b0, b2);
+        cfg.add_edge(b1, b3);
+        cfg.add_edge(b2, b3);
 
         cfg
     }
@@ -207,7 +207,7 @@ mod tests {
         // 0 -> 1 -> 2 -> 3 -> 4
         let mut cfg = CFG::new(Block(0), 5);
         for i in 0..4 {
-            cfg.add_edge(Block(i + 1), Block(i));
+            cfg.add_edge(Block(i), Block(i + 1));
         }
         let domtree = DomTree::compute(&cfg);
 
@@ -229,10 +229,10 @@ mod tests {
         //      ^         |
         //      |---------|
         let mut cfg = CFG::new(Block(0), 4);
-        cfg.add_edge(Block(1), Block(0));
-        cfg.add_edge(Block(2), Block(1));
-        cfg.add_edge(Block(3), Block(2));
-        cfg.add_edge(Block(1), Block(3)); // back edge
+        cfg.add_edge(Block(0), Block(1));
+        cfg.add_edge(Block(1), Block(2));
+        cfg.add_edge(Block(2), Block(3));
+        cfg.add_edge(Block(3), Block(1)); // back edge
 
         let domtree = DomTree::compute(&cfg);
 
@@ -257,13 +257,13 @@ mod tests {
         //      | ------------ |
         // One outer loop 1-2-3-4-1 and one inner loop 2-3-2
         let mut cfg = CFG::new(Block(0), 6);
-        cfg.add_edge(Block(1), Block(0));
-        cfg.add_edge(Block(2), Block(1));
-        cfg.add_edge(Block(3), Block(2));
-        cfg.add_edge(Block(4), Block(3));
-        cfg.add_edge(Block(5), Block(4));
-        cfg.add_edge(Block(1), Block(4)); // back edge (outer loop)
-        cfg.add_edge(Block(2), Block(3)); // back edge (inner loop)
+        cfg.add_edge(Block(0), Block(1));
+        cfg.add_edge(Block(1), Block(2));
+        cfg.add_edge(Block(2), Block(3));
+        cfg.add_edge(Block(3), Block(4));
+        cfg.add_edge(Block(4), Block(5));
+        cfg.add_edge(Block(4), Block(1)); // back edge (outer loop)
+        cfg.add_edge(Block(3), Block(2)); // back edge (inner loop)
 
         let domtree = DomTree::compute(&cfg);
 
@@ -300,12 +300,12 @@ mod tests {
         //                ^----|
         // Two loops: 1-2-3-1 and 3-4-3
         let mut cfg = CFG::new(Block(0), 5);
-        cfg.add_edge(Block(1), Block(0));
-        cfg.add_edge(Block(2), Block(1));
-        cfg.add_edge(Block(3), Block(2));
-        cfg.add_edge(Block(4), Block(3));
-        cfg.add_edge(Block(1), Block(3)); // back edge (outer loop)
-        cfg.add_edge(Block(3), Block(4)); // forward edge
+        cfg.add_edge(Block(0), Block(1));
+        cfg.add_edge(Block(1), Block(2));
+        cfg.add_edge(Block(2), Block(3));
+        cfg.add_edge(Block(3), Block(4));
+        cfg.add_edge(Block(3), Block(1)); // back edge (outer loop)
+        cfg.add_edge(Block(4), Block(3)); // forward edge
 
         let domtree = DomTree::compute(&cfg);
 
@@ -336,14 +336,14 @@ mod tests {
         // and some random connections to make it more interesting
         let mut cfg = CFG::new(Block(0), 20);
         for i in 0..19 {
-            cfg.add_edge(Block(i + 1), Block(i));
+            cfg.add_edge(Block(i), Block(i + 1));
         }
 
         // Add some random connections
-        cfg.add_edge(Block(5), Block(15));
-        cfg.add_edge(Block(12), Block(3));
-        cfg.add_edge(Block(7), Block(18));
-        cfg.add_edge(Block(1), Block(9));
+        cfg.add_edge(Block(15), Block(5));
+        cfg.add_edge(Block(3), Block(12));
+        cfg.add_edge(Block(18), Block(7));
+        cfg.add_edge(Block(9), Block(1));
 
         let domtree = DomTree::compute(&cfg);
 

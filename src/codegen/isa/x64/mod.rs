@@ -5,3 +5,6 @@ pub mod passes;
 pub mod pipeline;
 pub mod regs;
 pub mod sysv;
+
+#[cfg(test)]
+mod fuzz;

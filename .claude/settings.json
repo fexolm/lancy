@@ -15,9 +15,10 @@
   },
   "permissions": {
     "allow": [
-      "Bash(cargo test *)",
-      "Bash(git status *)",
-      "Bash(git diff *)"
+      "Bash",
+      "Read",
+      "Edit",
+      "Write"
     ]
   }
 }

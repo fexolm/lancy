@@ -7,11 +7,11 @@
 use crate::codegen::analysis::cfg::CFG;
 use crate::codegen::isa::x64::inst::X64Inst;
 use crate::codegen::isa::x64::mc::emit_mc::FnMCWriter;
-use crate::codegen::isa::x64::passes::{abi_lower, pseudo_cleanup};
+use crate::codegen::isa::x64::passes::abi_lower::SysVAmd64Lowering;
 use crate::codegen::isa::x64::regs::{R10, R11, R12, R13, R8, R9, RAX, RBX, RCX, RDI, RDX, RSI};
-use crate::codegen::isa::x64::sysv::SysVAmd64;
 use crate::codegen::jit::Module;
-use crate::codegen::regalloc::{RegAlloc, RegAllocConfig};
+use crate::codegen::passes::AbiLowering;
+use crate::codegen::regalloc::{LinearScan, RegAllocConfig, RegAllocator};
 use crate::codegen::tir::{Func, Reg};
 use std::collections::HashMap;
 
@@ -35,12 +35,14 @@ pub fn default_ra_config(reg_bind: HashMap<Reg, Reg>) -> RegAllocConfig {
 /// Compile a function end-to-end. Returns the emitted bytes.
 #[must_use]
 pub fn compile(mut func: Func<X64Inst>) -> Vec<u8> {
-    let abi = abi_lower::lower(&mut func, SysVAmd64);
+    let abi = SysVAmd64Lowering.lower(&mut func);
     let cfg = CFG::compute(&func).expect("CFG compute on valid function");
     let ra_cfg = default_ra_config(abi.reg_bind);
-    let mut ra = RegAlloc::new(&func, &cfg, &ra_cfg);
-    let ra_res = ra.run();
-    pseudo_cleanup::run(&mut func, &ra_res);
+    let ra_res = LinearScan::allocate(&func, &cfg, &ra_cfg);
+    // No separate `pseudo_cleanup` pass: the MC emitter handles pseudo
+    // Arg/Copy inline, which keeps `BlockLayout` point numbering stable
+    // between the allocator and the emitter (the allocator's `split_moves`
+    // reference these exact points).
     let mut w = FnMCWriter::new(&func, &ra_cfg, &ra_res);
     w.emit_fn()
 }

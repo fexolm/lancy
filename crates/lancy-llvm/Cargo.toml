@@ -1,0 +1,12 @@
+[package]
+name = "lancy-llvm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lancy = { path = "../.." }
+inkwell = { version = "0.9", features = ["llvm20-1"] }
+# Force dynamic linking against libLLVM-20.so so we don't drag in static
+# Polly / component libraries the distro package doesn't ship.
+llvm-sys = { version = "201", features = ["force-dynamic"] }
+thiserror = "2.0.12"

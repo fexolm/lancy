@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/lancy-llvm"]
+
 [package]
 name = "lancy"
 version = "0.1.0"

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "Claude has finished a turn in the lancy project at /home/fexolm/git/lancy. Read .claude/agents/test-validator.md for the full playbook and execute it. The playbook handles its own gate: if no .rs files changed in this turn, it exits without work.",
+            "timeout": 300,
+            "statusMessage": "Validating tests..."
+          }
+        ]
+      }
+    ]
+  }
+}

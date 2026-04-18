@@ -44,11 +44,24 @@ See `docs/ARCHITECTURE.md` for the full design, `docs/ROADMAP.md` for the phased
 
 ## File layout
 
-- `src/codegen/tir/` — generic target IR: `Func`, `Block`, `Inst` trait, `PseudoInstruction`.
-- `src/codegen/isa/x64/` — x86_64 ISA: instructions, registers, MC emission.
-- `src/codegen/analysis/` — CFG, liveness, dominance.
-- `src/codegen/regalloc/` — register allocator.
-- `src/support/` — infra: slotmap, bitset.
+Generic (target-neutral):
+- `src/codegen/tir/` — target-level IR: `Func`, `Block`, `Inst` trait, `PseudoInstruction`.
+- `src/codegen/analysis/` — CFG, liveness, dominance. All generic over `I: Inst`.
+- `src/codegen/regalloc/` — linear-scan register allocator. Generic over `I: Inst`.
+- `src/codegen/jit/` — `Module`: mmap + mprotect + typed entry-point. ISA-agnostic.
+
+x86-64 (everything the ISA touches lives under one roof):
+- `src/codegen/isa/x64/inst.rs` — `X64Inst`, `Cond`, `Mem`.
+- `src/codegen/isa/x64/regs.rs` — register constants.
+- `src/codegen/isa/x64/sysv.rs` — SysV AMD64 constants + `SysVAmd64` handle.
+- `src/codegen/isa/x64/builder.rs` — `FuncBuilder` (v0 frontend emitting `X64Inst`).
+- `src/codegen/isa/x64/passes/abi_lower.rs` — `Arg`/`Return` → pinned shims + Copy/RawRet.
+- `src/codegen/isa/x64/passes/pseudo_cleanup.rs` — `Arg`/`Copy` → target MOV or elide.
+- `src/codegen/isa/x64/mc/emit_mc.rs` — iced-x86 backed MC emitter, prologue/epilogue.
+- `src/codegen/isa/x64/pipeline.rs` — `compile` / `jit` glue.
+
+Infra:
+- `src/support/` — slotmap, bitset.
 
 ## Commands
 
@@ -82,13 +95,17 @@ Disable temporarily via `/hooks` if the loop is noisy during a refactor.
 
 ## Known bugs / technical debt
 
-Start here when looking for a short first task:
-- `src/support/bitset.rs:85` — `has` bounds check uses magic `32` instead of `Self::bits_in_bucket()` (64). Two tests fail.
-- `src/codegen/analysis/dom_tree.rs:66` — `compute_idom` panics on unreachable blocks via `unwrap()`. Four tests fail on loop CFGs.
-- `src/codegen/regalloc/fast.rs:84` — debug `println!` in hot path.
-- `src/codegen/isa/x64/inst.rs` — six `todo!()` in `get_defs` / `Display` (CondJmp, Mov64mi64, CMP64rr, Mov64rm, Mov64mr, Mov64ri64).
-- `src/codegen/isa/x64/mc/emit_mc.rs` — all variants except `Mov64rr`/`Jmp` emit as `todo!()`.
-- `src/bin/main.rs` — regalloc invocation commented out; replace with end-to-end demo once JIT runtime lands.
+Current gaps (roughly ordered by friction):
+- No `Phi` pseudo or SSA-destruction pass — multi-block functions with value merges must encode them by hand (e.g. via pre-binding). Blocks Phase 3.
+- No stack-passed arguments. `abi_lower` panics if the frontend requests arg index ≥ 6 on SysV.
+- No `CallPseudo` lowering. Single-function JIT only.
+- No `IDIV` / shift / bitwise ops yet. Covered under Phase 2.
+- Allocatable pool is restricted to caller-saved `SysV` regs. Extending to
+  callee-saved requires the emitter's prologue to save any callee-saved regs
+  the allocator picks — the save/restore mechanism is already in place for
+  the two callee-saved scratch regs.
+- `regalloc/fast.rs` does not yet coalesce `Copy` — all copies survive as MOVs unless source and dest happen to land on the same preg.
+- No JIT symbol resolution (`CallPseudo` → extern C). Windows support unimplemented.
 
 ## Style
 

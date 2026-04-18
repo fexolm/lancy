@@ -80,21 +80,25 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
         let mut sorted_live_ranges: Vec<(Reg, &LiveRange)> = live_ranges.iter().collect();
         sorted_live_ranges.sort_by_key(|(_, range)| range.start);
 
-        for (key, range) in &sorted_live_ranges {
-            println!("{:?}: {:?}..{:?}", key, range.start, range.end);
-        }
-
         let mut coloring: SecondaryMap<Reg, AllocatedSlot> =
-            SecondaryMap::new(self.func.get_regs_count()); // (Virtual register, Physical Register)
-        let mut frame_layout: SecondaryMap<StackSlot, usize> = SecondaryMap::new(self.func.get_regs_count());
+            SecondaryMap::new(self.func.get_regs_count());
+        let mut frame_layout: SecondaryMap<StackSlot, usize> =
+            SecondaryMap::new(self.func.get_regs_count());
+
         for (vreg, lr) in &sorted_live_ranges {
             self.expire(lr.start);
 
             if self.config.reg_bind.contains_key(vreg) {
                 let preg = self.config.reg_bind[vreg];
                 if !self.free_regs.has(preg as usize) {
-                    let spill_reg = self.last_preg_use[preg];
-                    coloring.set(spill_reg, AllocatedSlot::Stack(self.stack_slots));
+                    // Preg is held by another vreg — evict it to a stack slot.
+                    // The evicted vreg's end-of-range entry in `expire_range`
+                    // must be removed so the preg isn't freed twice (once by
+                    // the evictee's stale entry, once by the new owner).
+                    let evictee = self.last_preg_use[preg];
+                    let evictee_end = live_ranges[evictee].end;
+                    self.expire_range.remove(&(evictee_end, preg));
+                    coloring.set(evictee, AllocatedSlot::Stack(self.stack_slots));
                     frame_layout.set(self.stack_slots, (self.stack_slots * 8) as usize);
                     self.stack_slots += 1;
                 }
@@ -117,7 +121,11 @@ impl<'i, I: Inst> RegAlloc<'i, I> {
             }
         }
 
-        RegAllocResult { coloring, frame_layout, frame_size: self.stack_slots * 8 }
+        RegAllocResult {
+            coloring,
+            frame_layout,
+            frame_size: self.stack_slots * 8,
+        }
     }
 }
 
@@ -130,19 +138,20 @@ mod tests {
     use crate::codegen::tir::{Func, PseudoInstruction};
     use std::collections::HashMap;
 
+    use crate::codegen::regalloc::AllocatedSlot;
+    use crate::codegen::tir::Reg;
+
+    fn default_cfg(reg_bind: HashMap<Reg, Reg>) -> RegAllocConfig {
+        RegAllocConfig {
+            preg_count: 32,
+            allocatable_regs: vec![RAX, RBX, RCX, RDX],
+            scratch_regs: vec![R12, R13],
+            reg_bind,
+        }
+    }
+
     #[test]
     fn simple_test() {
-        // foo:
-        // @0
-        //     arg v0
-        //     mov v1 v0
-        //     jmp @1
-        // @1
-        //     mov v2 v1
-        //     jmp @2
-        // @2
-        //     mov v3 v2
-        //     ret v3
         let mut func = Func::<X64Inst>::new("foo".to_string());
 
         let b0 = func.add_empty_block();
@@ -160,7 +169,7 @@ mod tests {
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v0 });
+            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v0, idx: 0 });
             block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
             block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
         }
@@ -174,31 +183,56 @@ mod tests {
         {
             let block_data = func.get_block_data_mut(b2);
             block_data.push_target_inst(X64Inst::Mov64rr { dst: v3, src: v2 });
-            block_data.push_target_inst(X64Inst::Ret { src: v3 });
+            block_data.push_pseudo_inst(PseudoInstruction::Return { src: v3 });
         }
 
-        println!("{func}");
-
         let cfg = CFG::compute(&func).unwrap();
-        let allocatable_regs = vec![RAX, RBX, RCX, RDX];
-        let scratch_regs = vec![R12, R13];
-        let reg_alloc_config = RegAllocConfig {
-            preg_count: 32,
-            allocatable_regs,
-            scratch_regs,
-            reg_bind,
-        };
+        let reg_alloc_config = default_cfg(reg_bind);
         let mut regalloc = RegAlloc::new(&func, &cfg, &reg_alloc_config);
         let res = regalloc.run();
 
-        for (vir_reg, phys_reg) in res.coloring.iter() {
-            println!("v{vir_reg:?}->{phys_reg:?}");
+        assert_eq!(res.coloring[v0], AllocatedSlot::Reg(RAX));
+        assert_eq!(res.coloring[v3], AllocatedSlot::Reg(RAX));
+        for &v in &[v0, v1, v2, v3] {
+            let slot = res.coloring[v];
+            assert!(matches!(slot, AllocatedSlot::Reg(_) | AllocatedSlot::Stack(_)));
         }
+    }
 
-        for (stack_slot, offest) in res.frame_layout.iter() {
-            println!("slot {stack_slot:?} offset {offest:?}");
+    #[test]
+    fn regalloc_spills_when_pressure_exceeds_pool() {
+        // Produce 6 independent, overlapping live values; only 2 allocatable
+        // regs -> at least 4 must end up on the stack.
+        let mut func = Func::<X64Inst>::new("pressure".to_string());
+        let b0 = func.add_empty_block();
+        let vregs: Vec<Reg> = (0..6).map(|_| func.new_vreg()).collect();
+        {
+            let bd = func.get_block_data_mut(b0);
+            for (i, &v) in vregs.iter().enumerate() {
+                bd.push_target_inst(X64Inst::Mov64ri { dst: v, imm: i as i64 });
+            }
+            // Chain them so the liveness of each extends to the return.
+            for window in vregs.windows(2) {
+                bd.push_target_inst(X64Inst::Add64rr {
+                    dst: window[1],
+                    src: window[0],
+                });
+            }
+            bd.push_pseudo_inst(PseudoInstruction::Return { src: *vregs.last().unwrap() });
         }
-
-        assert_eq!(true, true);
+        let cfg = CFG::compute(&func).unwrap();
+        let cfg_config = RegAllocConfig {
+            preg_count: 32,
+            allocatable_regs: vec![RAX, RBX],
+            scratch_regs: vec![R12, R13],
+            reg_bind: HashMap::new(),
+        };
+        let mut regalloc = RegAlloc::new(&func, &cfg, &cfg_config);
+        let res = regalloc.run();
+        let spilled = vregs
+            .iter()
+            .filter(|&&v| matches!(res.coloring[v], AllocatedSlot::Stack(_)))
+            .count();
+        assert!(spilled >= 1, "expected at least one spill under pressure");
     }
 }

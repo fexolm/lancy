@@ -73,24 +73,23 @@ impl DomTree {
     }
 
     fn common_dominator(&self, mut a: Block, mut b: Block) -> Block {
-        loop {
+        // Cooper-Harvey-Kennedy "intersect": walk both pointers up the idom chain
+        // until they meet. Lower rpo = closer to entry; the block with higher rpo
+        // climbs. Convergence at entry terminates via the `a == b` check.
+        while a != b {
             let a_rpo = self.nodes[a].rpo;
             let b_rpo = self.nodes[b].rpo;
-
-            match a_rpo.cmp(&b_rpo) {
-                std::cmp::Ordering::Less => {
-                    let idom = self.nodes[b].idom.unwrap();
-                    b = idom;
-                }
-                std::cmp::Ordering::Equal => {
-                    let idom = self.nodes[a].idom.unwrap();
-                    a = idom;
-                }
-                std::cmp::Ordering::Greater => {
-                    return a;
-                }
+            if a_rpo < b_rpo {
+                b = self.nodes[b]
+                    .idom
+                    .expect("non-entry reachable block must have an idom");
+            } else {
+                a = self.nodes[a]
+                    .idom
+                    .expect("non-entry reachable block must have an idom");
             }
         }
+        a
     }
 
     #[must_use]

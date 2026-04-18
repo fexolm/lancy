@@ -82,7 +82,7 @@ impl FixedBitSet {
 
     #[must_use]
     pub fn has(&self, index: usize) -> bool {
-        if index >= self.buckets.len() * 32 {
+        if index >= self.buckets.len() * Self::bits_in_bucket() {
             return false;
         }
         let num_bucket = index / Self::bits_in_bucket();
@@ -133,7 +133,7 @@ mod tests {
     fn test_new_and_len() {
         let bs = FixedBitSet::zeroes(100);
         assert_eq!(bs.ones_count(), 0);
-        assert_eq!(bs.buckets.len(), 100_usize.div_ceil(32));
+        assert_eq!(bs.buckets.len(), 100_usize.div_ceil(64));
     }
 
     #[test]

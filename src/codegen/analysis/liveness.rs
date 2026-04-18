@@ -184,6 +184,13 @@ impl LiveRanges {
 
                 for r in inst.get_defs() {
                     ranges[r].start = std::cmp::min(ranges[r].start, p);
+                    // A defined-but-never-used vreg (e.g., an ABI return shim
+                    // whose value the terminator needs in a physical register
+                    // but never "uses" in the IR sense) would otherwise have
+                    // end = MIN < start. Downstream code treats that as "ends
+                    // before it begins" and prematurely frees pregs. Anchor
+                    // end at the def so the live range is at least point-sized.
+                    ranges[r].end = std::cmp::max(ranges[r].end, p);
                 }
             }
 
@@ -238,7 +245,7 @@ mod tests {
             let mut block_data = BlockData::new();
 
             block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
-            block_data.push_target_inst(X64Inst::Ret { src: v1 });
+            block_data.push_pseudo_inst(PseudoInstruction::Return { src: v1 });
 
             func.add_block(block_data)
         };
@@ -292,7 +299,7 @@ mod tests {
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v1 });
+            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v1, idx: 0 });
             block_data.push_target_inst(X64Inst::Mov64rr { dst: v0, src: v1 });
 
             block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
@@ -301,7 +308,7 @@ mod tests {
         {
             let block_data = func.get_block_data_mut(b1);
             block_data.push_target_inst(X64Inst::Mov64rr { dst: v1, src: v0 });
-            block_data.push_target_inst(X64Inst::Ret { src: v1 });
+            block_data.push_pseudo_inst(PseudoInstruction::Return { src: v1 });
         }
 
         let cfg = CFG::compute(&func).unwrap();
@@ -369,7 +376,7 @@ mod tests {
 
         {
             let block_data = func.get_block_data_mut(b0);
-            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v2 });
+            block_data.push_pseudo_inst(PseudoInstruction::Arg { dst: v2, idx: 0 });
             block_data.push_target_inst(X64Inst::Jmp { dst: b1 });
         }
 

@@ -67,6 +67,23 @@ impl<I: Inst> BlockData<I> {
     pub fn is_empty(&self) -> bool {
         self.insts.is_empty()
     }
+
+    #[must_use]
+    pub fn insts(&self) -> &[Instruction<I>] {
+        &self.insts
+    }
+
+    pub fn take_insts(&mut self) -> Vec<Instruction<I>> {
+        std::mem::take(&mut self.insts)
+    }
+
+    pub fn set_insts(&mut self, insts: Vec<Instruction<I>>) {
+        self.insts = insts;
+    }
+
+    pub fn push_inst(&mut self, inst: Instruction<I>) {
+        self.insts.push(inst);
+    }
 }
 
 impl<I: Inst> Display for BlockData<I> {

@@ -15,7 +15,7 @@
   },
   "permissions": {
     "allow": [
-      "Bash",
+      "Bash(git *)",
       "Read",
       "Edit",
       "Write"

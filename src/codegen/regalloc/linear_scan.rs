@@ -59,6 +59,13 @@ struct Allocator<'a> {
     ranges: LiveRanges,
     copy_src: SecondaryMap<Reg, Option<Reg>>,
 
+    /// Merged view of `config.reg_bind` + in-stream `RegDef` pseudos.
+    /// Both sources contribute whole-life pins; if a vreg is pinned from
+    /// both sides, they must agree. The rest of the allocator consults
+    /// this instead of `config.reg_bind` directly so frontends can use
+    /// either mechanism interchangeably.
+    effective_binds: HashMap<Reg, Reg>,
+
     /// Current slot of each vreg (None = not yet allocated). Updated on
     /// assign and on eviction. This is transient: on piece close, it's
     /// committed to `assignments[v]`.
@@ -84,6 +91,7 @@ impl<'a> Allocator<'a> {
     ) -> Self {
         let ranges = LiveRanges::compute(func, cfg, layout);
         let copy_src = collect_copy_src(func);
+        let effective_binds = merge_pre_binds(config, func);
         let n = func.get_regs_count();
         let mut assignments = SecondaryMap::new(n);
         assignments.fill(Assignment::default());
@@ -91,6 +99,7 @@ impl<'a> Allocator<'a> {
             config,
             ranges,
             copy_src,
+            effective_binds,
             current_slot: vec![None; n],
             current_piece_start: vec![0; n],
             assignments,
@@ -110,8 +119,8 @@ impl<'a> Allocator<'a> {
             let sa = self.ranges[a].first_start().unwrap();
             let sb = self.ranges[b].first_start().unwrap();
             sa.cmp(&sb).then_with(|| {
-                let ba = self.config.reg_bind.contains_key(&a);
-                let bb = self.config.reg_bind.contains_key(&b);
+                let ba = self.effective_binds.contains_key(&a);
+                let bb = self.effective_binds.contains_key(&b);
                 bb.cmp(&ba)
             })
         });
@@ -174,7 +183,7 @@ impl<'a> Allocator<'a> {
     }
 
     fn allocate(&mut self, v: Reg, position: ProgramPoint) {
-        if let Some(&target) = self.config.reg_bind.get(&v) {
+        if let Some(&target) = self.effective_binds.get(&v) {
             self.evict_conflicts_on(target, v, position);
             self.assign_fresh_reg(v, target);
             return;
@@ -270,7 +279,7 @@ impl<'a> Allocator<'a> {
                 continue;
             }
             let u = blockers[0];
-            if self.config.reg_bind.contains_key(&u) {
+            if self.effective_binds.contains_key(&u) {
                 continue;
             }
             let u_end = self.ranges[u].last_end().unwrap();
@@ -306,7 +315,7 @@ impl<'a> Allocator<'a> {
         }
         for u in conflicts {
             assert!(
-                !self.config.reg_bind.contains_key(&u),
+                !self.effective_binds.contains_key(&u),
                 "pre-bind conflict: vreg {u} also pre-bound to preg {target}, can't evict for vreg {v}"
             );
             self.evict_to_stack(u, position);
@@ -395,7 +404,7 @@ impl<'a> Allocator<'a> {
     fn check_pre_bind_compat(&self) {
         use std::collections::HashMap;
         let mut by_preg: HashMap<Reg, Vec<Reg>> = HashMap::new();
-        for (&v, &p) in &self.config.reg_bind {
+        for (&v, &p) in &self.effective_binds {
             by_preg.entry(p).or_default().push(v);
         }
         for (p, mut vs) in by_preg {
@@ -410,10 +419,10 @@ impl<'a> Allocator<'a> {
                     let start = a.first_start().unwrap().min(b.first_start().unwrap());
                     assert!(
                         a.next_intersection_at_or_after(b, start).is_none(),
-                        "config.reg_bind pins both vreg {} and vreg {} to preg {} \
-                         with overlapping live ranges — one would have to be spilled, \
-                         defeating the pre-bind. Fix the frontend to pick disjoint \
-                         pregs for concurrently-live pre-binds.",
+                        "pre-bind conflict: vreg {} and vreg {} are both pinned to preg {} \
+                         (via `reg_bind` or `RegDef`) with overlapping live ranges — one \
+                         would have to be spilled, defeating the pre-bind. Fix the frontend \
+                         to pick disjoint pregs for concurrently-live pre-binds.",
                         vs[i],
                         vs[j],
                         p
@@ -435,6 +444,27 @@ fn collect_copy_src<I: Inst>(func: &Func<I>) -> SecondaryMap<Reg, Option<Reg>> {
         }
     }
     m
+}
+
+/// Build the allocator's effective pre-bind map by merging `config.reg_bind`
+/// with in-stream `RegDef` pseudos. Both sources pin a vreg to a preg for
+/// its whole life; a vreg that appears in both must agree on the same preg.
+fn merge_pre_binds<I: Inst>(config: &RegAllocConfig, func: &Func<I>) -> HashMap<Reg, Reg> {
+    let mut out: HashMap<Reg, Reg> = config.reg_bind.clone();
+    for (_b, bd) in func.blocks_iter() {
+        for inst in bd.iter() {
+            if let Instruction::Pseudo(PseudoInstruction::RegDef { vreg, preg }) = inst {
+                match out.insert(*vreg, *preg) {
+                    Some(prev) if prev != *preg => panic!(
+                        "vreg {vreg} is pre-bound to both preg {prev} (via reg_bind) \
+                         and preg {preg} (via RegDef). Sources must agree."
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -579,6 +609,62 @@ mod tests {
                 .any(|s| matches!(s, AllocatedSlot::Stack(_)))
         });
         assert!(any_on_stack, "expected at least one spill under 2-reg pressure");
+    }
+
+    #[test]
+    fn in_stream_regdef_pins_vreg_same_as_reg_bind() {
+        // Same behavior as pre_bind_eviction_splits_the_incumbent_live_range,
+        // but the pin is expressed via `RegDef` instead of `reg_bind`.
+        let mut func = Func::<X64Inst>::new("regdef-pin".into());
+        let b0 = func.add_empty_block();
+        let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
+        {
+            let bd = func.get_block_data_mut(b0);
+            bd.push_target_inst(X64Inst::Mov64ri { dst: v0, imm: 1 });
+            bd.push_pseudo_inst(PseudoInstruction::RegDef { vreg: v1, preg: RDI });
+            bd.push_target_inst(X64Inst::Mov64ri { dst: v1, imm: 2 });
+            bd.push_pseudo_inst(PseudoInstruction::Return { src: v1 });
+        }
+        let cfg = CFG::compute(&func).unwrap();
+        let res = LinearScan::allocate(&func, &cfg, &cfg4(HashMap::new()));
+        assert_eq!(uniform(&res, v1), AllocatedSlot::Reg(RDI));
+    }
+
+    #[test]
+    fn regdef_agreeing_with_reg_bind_is_fine() {
+        let mut func = Func::<X64Inst>::new("agree".into());
+        let b0 = func.add_empty_block();
+        let v = func.new_vreg();
+        let mut reg_bind = HashMap::new();
+        reg_bind.insert(v, RDI);
+        {
+            let bd = func.get_block_data_mut(b0);
+            bd.push_pseudo_inst(PseudoInstruction::RegDef { vreg: v, preg: RDI });
+            bd.push_target_inst(X64Inst::Mov64ri { dst: v, imm: 1 });
+            bd.push_pseudo_inst(PseudoInstruction::Return { src: v });
+        }
+        let cfg = CFG::compute(&func).unwrap();
+        let res = LinearScan::allocate(&func, &cfg, &cfg4(reg_bind));
+        assert_eq!(uniform(&res, v), AllocatedSlot::Reg(RDI));
+    }
+
+    #[test]
+    #[should_panic(expected = "pre-bound to both")]
+    fn regdef_disagreeing_with_reg_bind_panics() {
+        let mut func = Func::<X64Inst>::new("disagree".into());
+        let b0 = func.add_empty_block();
+        let v = func.new_vreg();
+        let mut reg_bind = HashMap::new();
+        reg_bind.insert(v, RDI);
+        {
+            let bd = func.get_block_data_mut(b0);
+            bd.push_pseudo_inst(PseudoInstruction::RegDef { vreg: v, preg: RSI });
+            bd.push_target_inst(X64Inst::Mov64ri { dst: v, imm: 1 });
+            bd.push_pseudo_inst(PseudoInstruction::Return { src: v });
+        }
+        let cfg = CFG::compute(&func).unwrap();
+        let _ = LinearScan::allocate(&func, &cfg, &cfg4(reg_bind));
     }
 
     #[test]

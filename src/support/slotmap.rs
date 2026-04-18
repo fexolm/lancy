@@ -126,9 +126,7 @@ macro_rules! slotmap_key {
         #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq, Default)]
         pub struct $key(pub $inner_type);
 
-        use $crate::support::slotmap::Key;
-
-        impl Key for $key {
+        impl $crate::support::slotmap::Key for $key {
             const NONE_VAL: Self = Self(<$inner_type>::MAX);
 
             fn new(v: usize) -> Self {

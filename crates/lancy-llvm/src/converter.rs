@@ -15,7 +15,7 @@ use lancy::codegen::isa::x64::builder::FuncBuilder;
 use lancy::codegen::isa::x64::inst::{Cond, X64Inst};
 use lancy::codegen::isa::x64::pipeline;
 use lancy::codegen::jit::Module as JitModule;
-use lancy::codegen::tir::{Block, Func, PhiId, Reg};
+use lancy::codegen::tir::{Block, Func, PhiId, Reg, Type as LancyType};
 
 use crate::error::ConvertError;
 
@@ -114,8 +114,8 @@ impl Converter {
         // Emit `arg` pseudos in entry-block order for each function param.
         self.builder.switch_to_block(self.builder.entry_block());
         for param in func.get_param_iter() {
-            check_int64(param)?;
-            let r = self.builder.arg();
+            let ty = lancy_type_of(param)?;
+            let r = self.builder.arg_typed(ty);
             self.vals.insert(val_key(&param), r);
         }
 
@@ -256,17 +256,14 @@ impl Converter {
                 self.builder.mfence();
                 Ok(())
             }
-            Op::ExtractValue
-            | Op::InsertValue
-            | Op::AtomicRMW
-            | Op::AtomicCmpXchg
-            | Op::ExtractElement
+            Op::ExtractValue => self.lower_extract_value(inst),
+            Op::InsertValue => self.lower_insert_value(inst),
+            Op::AtomicRMW => self.lower_atomic_rmw(inst),
+            Op::AtomicCmpXchg => self.lower_atomic_cmpxchg(inst),
+            Op::FAdd | Op::FSub | Op::FMul | Op::FDiv => self.lower_fbinop(inst),
+            Op::ExtractElement
             | Op::InsertElement
             | Op::ShuffleVector
-            | Op::FAdd
-            | Op::FSub
-            | Op::FMul
-            | Op::FDiv
             | Op::FRem
             | Op::FNeg
             | Op::FCmp
@@ -874,6 +871,114 @@ impl Converter {
         self.resolve_value(operand)
     }
 
+    fn lower_fbinop(&mut self, inst: InstructionValue<'_>) -> Result<(), ConvertError> {
+        use inkwell::types::AnyType;
+        use InstructionOpcode as Op;
+        let lhs = self.operand_reg(inst, 0)?;
+        let rhs = self.operand_reg(inst, 1)?;
+        let ty = lancy_type_of_any(inst.get_type().as_any_type_enum())?;
+        let dst = match (inst.get_opcode(), ty) {
+            (Op::FAdd, LancyType::F32) => self.builder.fadd_f32(lhs, rhs),
+            (Op::FSub, LancyType::F32) => self.builder.fsub_f32(lhs, rhs),
+            (Op::FMul, LancyType::F32) => self.builder.fmul_f32(lhs, rhs),
+            (Op::FDiv, LancyType::F32) => self.builder.fdiv_f32(lhs, rhs),
+            (Op::FAdd, LancyType::F64) => self.builder.fadd_f64(lhs, rhs),
+            (Op::FSub, LancyType::F64) => self.builder.fsub_f64(lhs, rhs),
+            (Op::FMul, LancyType::F64) => self.builder.fmul_f64(lhs, rhs),
+            (Op::FDiv, LancyType::F64) => self.builder.fdiv_f64(lhs, rhs),
+            (_, t) => {
+                return Err(ConvertError::Unsupported(format!(
+                    "FP binop on unsupported operand type {t}"
+                )));
+            }
+        };
+        self.vals.insert(val_key(&inst), dst);
+        Ok(())
+    }
+
+    fn lower_extract_value(
+        &mut self,
+        inst: InstructionValue<'_>,
+    ) -> Result<(), ConvertError> {
+        use inkwell::types::AnyType;
+        let agg = self.operand_reg(inst, 0)?;
+        let idx = Self::first_indices_u32(inst)?;
+        // Infer element type from the LLVM instruction's result type.
+        let elem_ty = lancy_type_of_any(inst.get_type().as_any_type_enum())?;
+        let dst = self.builder.extract_value(agg, idx, elem_ty);
+        self.vals.insert(val_key(&inst), dst);
+        Ok(())
+    }
+
+    fn lower_insert_value(
+        &mut self,
+        inst: InstructionValue<'_>,
+    ) -> Result<(), ConvertError> {
+        let agg = self.operand_reg(inst, 0)?;
+        let val = self.operand_reg(inst, 1)?;
+        let idx = Self::first_indices_u32(inst)?;
+        let dst = self.builder.insert_value(agg, val, idx);
+        self.vals.insert(val_key(&inst), dst);
+        Ok(())
+    }
+
+    fn lower_atomic_rmw(
+        &mut self,
+        inst: InstructionValue<'_>,
+    ) -> Result<(), ConvertError> {
+        use inkwell::AtomicRMWBinOp as B;
+        let binop = inst.get_atomic_rmw_bin_op().ok_or_else(|| {
+            ConvertError::Malformed("AtomicRMW missing binop".into())
+        })?;
+        if binop != B::Add {
+            return Err(ConvertError::Unsupported(format!(
+                "AtomicRMW binop {binop:?} not modeled; only Add maps to lock xadd today"
+            )));
+        }
+        let ptr = self.operand_reg(inst, 0)?;
+        let val = self.operand_reg(inst, 1)?;
+        let dst = self.builder.atomic_fetch_add_i64(ptr, 0, val);
+        self.vals.insert(val_key(&inst), dst);
+        Ok(())
+    }
+
+    fn lower_atomic_cmpxchg(
+        &mut self,
+        inst: InstructionValue<'_>,
+    ) -> Result<(), ConvertError> {
+        // LLVM cmpxchg returns { iN old, i1 success }; wrap the builder's
+        // (witness, success) pair so downstream extractvalue resolves.
+        let ptr = self.operand_reg(inst, 0)?;
+        let expected = self.operand_reg(inst, 1)?;
+        let desired = self.operand_reg(inst, 2)?;
+        let (witness, success) = self
+            .builder
+            .atomic_cmpxchg_i64(ptr, 0, expected, desired);
+        let agg = self.builder.make_aggregate(vec![witness, success]);
+        self.vals.insert(val_key(&inst), agg);
+        Ok(())
+    }
+
+    fn first_indices_u32(inst: InstructionValue<'_>) -> Result<u32, ConvertError> {
+        // LLVM-C exposes GetIndices; inkwell wraps it on AggregateInstValue.
+        // For simplicity, use the raw LLVM call via the value ref.
+        use llvm_sys::core::{LLVMGetIndices, LLVMGetNumIndices};
+        let n = unsafe { LLVMGetNumIndices(inst.as_value_ref()) };
+        if n == 0 {
+            return Err(ConvertError::Malformed(
+                "extract/insertvalue has no index".into(),
+            ));
+        }
+        if n > 1 {
+            return Err(ConvertError::Unsupported(format!(
+                "nested extract/insertvalue ({n} indices) not modeled yet"
+            )));
+        }
+        let ptr = unsafe { LLVMGetIndices(inst.as_value_ref()) };
+        let idx = unsafe { *ptr };
+        Ok(idx)
+    }
+
     fn resolve_value(&mut self, v: BasicValueEnum<'_>) -> Result<Reg, ConvertError> {
         let key = val_key(&v);
         if let Some(&r) = self.vals.get(&key) {
@@ -1131,20 +1236,43 @@ fn fused_icmp_index(insts: &[InstructionValue<'_>]) -> Option<usize> {
     Some(n - 2)
 }
 
-fn check_int64(v: BasicValueEnum<'_>) -> Result<(), ConvertError> {
-    match v {
-        BasicValueEnum::IntValue(iv) => {
-            let bw = iv.get_type().get_bit_width();
-            if bw == 64 {
-                Ok(())
-            } else {
-                Err(ConvertError::Unsupported(format!(
-                    "function argument is i{bw}; only i64 is supported"
-                )))
-            }
-        }
+fn lancy_type_of(v: BasicValueEnum<'_>) -> Result<LancyType, ConvertError> {
+    use inkwell::types::AnyType;
+    lancy_type_of_any(v.get_type().as_any_type_enum())
+}
+
+fn lancy_type_of_any(
+    ty: inkwell::types::AnyTypeEnum<'_>,
+) -> Result<LancyType, ConvertError> {
+    use inkwell::types::AnyTypeEnum as T;
+    use lancy::codegen::tir::AggregateId;
+    use lancy::support::slotmap::Key;
+    match ty {
+        T::IntType(it) => match it.get_bit_width() {
+            1 | 8 => Ok(LancyType::I8),
+            16 => Ok(LancyType::I16),
+            32 => Ok(LancyType::I32),
+            64 => Ok(LancyType::I64),
+            other => Err(ConvertError::Unsupported(format!(
+                "i{other} is not a supported scalar width"
+            ))),
+        },
+        T::PointerType(_) => Ok(LancyType::Ptr),
+        T::FloatType(ft) => match ft.print_to_string().to_string().as_str() {
+            "float" => Ok(LancyType::F32),
+            "double" => Ok(LancyType::F64),
+            other => Err(ConvertError::Unsupported(format!(
+                "unsupported float type: {other}"
+            ))),
+        },
+        // Placeholder id; `make_aggregate` picks the real one later,
+        // and `is_fp_or_vector` doesn't inspect the id anyway.
+        T::StructType(_) => Ok(LancyType::Agg(AggregateId::new(0))),
+        T::VoidType(_) => Err(ConvertError::Malformed(
+            "cannot map void type to a lancy Type".into(),
+        )),
         other => Err(ConvertError::Unsupported(format!(
-            "non-integer function argument: {other:?}"
+            "lancy_type_of: {other:?}"
         ))),
     }
 }

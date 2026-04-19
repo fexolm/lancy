@@ -9,7 +9,7 @@
 use crate::codegen::isa::x64::inst::{Cond, Mem, X64Inst};
 use crate::codegen::isa::x64::regs::{RAX, RCX, RDX};
 use crate::codegen::tir::{
-    Block, CallData, CallTarget, Func, Inst, PhiId, PseudoInstruction, Reg,
+    AggregateId, Block, CallData, CallTarget, Func, Inst, PhiId, PseudoInstruction, Reg, Type,
 };
 
 pub struct FuncBuilder {
@@ -54,6 +54,12 @@ impl FuncBuilder {
         self.func.new_vreg()
     }
 
+    /// Allocate a fresh vreg of the given type. Use for FP / vector /
+    /// non-I64 values so the allocator and emitter can route correctly.
+    pub fn new_typed_vreg(&mut self, ty: Type) -> Reg {
+        self.func.new_typed_vreg(ty)
+    }
+
     pub fn copy_into(&mut self, dst: Reg, src: Reg) {
         self.func
             .get_block_data_mut(self.current)
@@ -79,11 +85,18 @@ impl FuncBuilder {
     /// Define the next incoming argument. Must be called on the entry block.
     /// Returns a fresh vreg that holds the argument value.
     pub fn arg(&mut self) -> Reg {
+        self.arg_typed(Type::I64)
+    }
+
+    /// Typed variant of `arg` — stamps the given `Type` on the returned
+    /// vreg so ABI lowering can route it into the FP argument-register
+    /// pool when `ty.is_fp_or_vector()`.
+    pub fn arg_typed(&mut self, ty: Type) -> Reg {
         assert_eq!(
             self.current, self.entry,
             "arg() must be called while positioned on the entry block"
         );
-        let dst = self.func.new_vreg();
+        let dst = self.func.new_typed_vreg(ty);
         let idx = self.arg_count;
         self.arg_count += 1;
         self.func
@@ -572,9 +585,17 @@ impl FuncBuilder {
     }
 
     /// Emit an indirect call through a register holding a function
-    /// pointer.
+    /// pointer. Returns an integer-typed return vreg.
     pub fn call_indirect(&mut self, fn_ptr: Reg, args: &[Reg]) -> Reg {
-        let user_ret = self.func.new_vreg();
+        self.call_indirect_typed(fn_ptr, args, Type::I64)
+    }
+
+    /// Variant of `call_indirect` that stamps the given `Type` on the
+    /// return vreg. Use for calls whose return belongs to a different
+    /// class (FP via `Type::F64` / `Type::F32`) so ABI lowering pins
+    /// the return shim to XMM0 rather than RAX.
+    pub fn call_indirect_typed(&mut self, fn_ptr: Reg, args: &[Reg], ret_ty: Type) -> Reg {
+        let user_ret = self.func.new_typed_vreg(ret_ty);
         let id = self.func.new_call(CallData {
             callee: CallTarget::Indirect(fn_ptr),
             args: args.to_vec(),
@@ -584,6 +605,184 @@ impl FuncBuilder {
             .get_block_data_mut(self.current)
             .push_pseudo_inst(PseudoInstruction::CallPseudo { id });
         user_ret
+    }
+
+    // ---- Floating-point helpers. ----
+
+    fn fp_binop<F>(&mut self, ty: Type, a: Reg, b: Reg, make_inst: F) -> Reg
+    where
+        F: FnOnce(Reg, Reg) -> X64Inst,
+    {
+        let dst = self.func.new_typed_vreg(ty);
+        let bd = self.func.get_block_data_mut(self.current);
+        bd.push_pseudo_inst(PseudoInstruction::Copy { dst, src: a });
+        bd.push_target_inst(make_inst(dst, b));
+        dst
+    }
+
+    pub fn fadd_f32(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F32, a, b, |dst, src| X64Inst::Addssrr { dst, src })
+    }
+    pub fn fsub_f32(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F32, a, b, |dst, src| X64Inst::Subssrr { dst, src })
+    }
+    pub fn fmul_f32(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F32, a, b, |dst, src| X64Inst::Mulssrr { dst, src })
+    }
+    pub fn fdiv_f32(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F32, a, b, |dst, src| X64Inst::Divssrr { dst, src })
+    }
+
+    pub fn fadd_f64(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F64, a, b, |dst, src| X64Inst::Addsdrr { dst, src })
+    }
+    pub fn fsub_f64(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F64, a, b, |dst, src| X64Inst::Subsdrr { dst, src })
+    }
+    pub fn fmul_f64(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F64, a, b, |dst, src| X64Inst::Mulsdrr { dst, src })
+    }
+    pub fn fdiv_f64(&mut self, a: Reg, b: Reg) -> Reg {
+        self.fp_binop(Type::F64, a, b, |dst, src| X64Inst::Divsdrr { dst, src })
+    }
+
+    /// `f32` load from `[base + disp]`.
+    pub fn load_f32(&mut self, base: Reg, disp: i32) -> Reg {
+        let dst = self.func.new_typed_vreg(Type::F32);
+        self.func
+            .get_block_data_mut(self.current)
+            .push_target_inst(X64Inst::Movssrm {
+                dst,
+                src: Mem::base_disp(base, disp),
+            });
+        dst
+    }
+
+    /// `f64` load from `[base + disp]`.
+    pub fn load_f64(&mut self, base: Reg, disp: i32) -> Reg {
+        let dst = self.func.new_typed_vreg(Type::F64);
+        self.func
+            .get_block_data_mut(self.current)
+            .push_target_inst(X64Inst::Movsdrm {
+                dst,
+                src: Mem::base_disp(base, disp),
+            });
+        dst
+    }
+
+    pub fn store_f32(&mut self, base: Reg, disp: i32, val: Reg) {
+        self.func
+            .get_block_data_mut(self.current)
+            .push_target_inst(X64Inst::Movssmr {
+                dst: Mem::base_disp(base, disp),
+                src: val,
+            });
+    }
+
+    pub fn store_f64(&mut self, base: Reg, disp: i32, val: Reg) {
+        self.func
+            .get_block_data_mut(self.current)
+            .push_target_inst(X64Inst::Movsdmr {
+                dst: Mem::base_disp(base, disp),
+                src: val,
+            });
+    }
+
+    // ---- Atomic helpers. ----
+
+    /// Atomic fetch-and-add on a 64-bit memory location. Returns the
+    /// pre-add memory value. xadd's register operand is both used and
+    /// redefined, so we shim `delta` into a fresh vreg.
+    pub fn atomic_fetch_add_i64(&mut self, base: Reg, disp: i32, delta: Reg) -> Reg {
+        let shim = self.func.new_typed_vreg(Type::I64);
+        let bd = self.func.get_block_data_mut(self.current);
+        bd.push_pseudo_inst(PseudoInstruction::Copy { dst: shim, src: delta });
+        bd.push_target_inst(X64Inst::LockXadd64mr {
+            dst: Mem::base_disp(base, disp),
+            src: shim,
+        });
+        shim
+    }
+
+    /// Atomic compare-and-swap on a 64-bit memory location. Returns
+    /// `(witness, success)`: `witness` is the pre-op memory value,
+    /// `success` is `1` on swap, `0` on mismatch.
+    pub fn atomic_cmpxchg_i64(
+        &mut self,
+        base: Reg,
+        disp: i32,
+        expected: Reg,
+        desired: Reg,
+    ) -> (Reg, Reg) {
+        let rax_in = self.func.new_typed_vreg(Type::I64);
+        let rax_out = self.func.new_typed_vreg(Type::I64);
+        self.func.pre_bind(rax_in, RAX);
+        self.func.pre_bind(rax_out, RAX);
+        let success_byte = self.func.new_typed_vreg(Type::I8);
+        let success = self.func.new_typed_vreg(Type::I64);
+        let bd = self.func.get_block_data_mut(self.current);
+        bd.push_pseudo_inst(PseudoInstruction::Copy { dst: rax_in, src: expected });
+        bd.push_target_inst(X64Inst::LockCmpxchg64mr {
+            dst: Mem::base_disp(base, disp),
+            src: desired,
+            rax_in,
+            rax_out,
+        });
+        // SETZ must run immediately after CMPXCHG — any intervening
+        // flag-writing op would clobber ZF.
+        bd.push_target_inst(X64Inst::Setcc8r {
+            cond: Cond::Z,
+            dst: success_byte,
+        });
+        bd.push_target_inst(X64Inst::Movzx64r8 {
+            dst: success,
+            src: success_byte,
+        });
+        // Unpin the witness so downstream users don't inherit RAX.
+        let out = self.func.new_typed_vreg(Type::I64);
+        self.func
+            .get_block_data_mut(self.current)
+            .push_pseudo_inst(PseudoInstruction::Copy { dst: out, src: rax_out });
+        (out, success)
+    }
+
+    // ---- Aggregate helpers. ----
+
+    /// Register an aggregate with initial `elems` and return its
+    /// handle vreg (erased by `lower_aggregates` before regalloc).
+    pub fn make_aggregate(&mut self, elems: Vec<Reg>) -> Reg {
+        let id: AggregateId = self.func.new_aggregate(elems);
+        let dst = self.func.new_typed_vreg(Type::Agg(id));
+        self.func
+            .get_block_data_mut(self.current)
+            .push_pseudo_inst(PseudoInstruction::MakeAggregate { dst, id });
+        dst
+    }
+
+    /// Extract element `idx` of aggregate `agg` as a fresh `elem_ty`
+    /// vreg.
+    pub fn extract_value(&mut self, agg: Reg, idx: u32, elem_ty: Type) -> Reg {
+        let dst = self.func.new_typed_vreg(elem_ty);
+        self.func
+            .get_block_data_mut(self.current)
+            .push_pseudo_inst(PseudoInstruction::ExtractValue { dst, agg, idx });
+        dst
+    }
+
+    /// Produce a new aggregate matching `agg` except element `idx` is
+    /// replaced by `val`.
+    pub fn insert_value(&mut self, agg: Reg, val: Reg, idx: u32) -> Reg {
+        let ty = self.func.vreg_type(agg);
+        let dst = self.func.new_typed_vreg(ty);
+        self.func
+            .get_block_data_mut(self.current)
+            .push_pseudo_inst(PseudoInstruction::InsertValue {
+                dst,
+                agg,
+                val,
+                idx,
+            });
+        dst
     }
 
     #[must_use]

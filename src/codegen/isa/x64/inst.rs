@@ -256,6 +256,64 @@ pub enum X64Inst {
     // Raw RET — assumes ABI return register is already set and the frame has
     // been torn down. Emitted by the prologue/epilogue pass.
     RawRet,
+
+    // ---- Scalar floating-point (SSE). ----
+    //
+    // All scalar FP ops take XMM-class vregs. The allocator uses the
+    // vreg's `Type` to route these into the XMM physical pool; any
+    // `dst`/`src` in the FP variants must have `Type::F32` or
+    // `Type::F64`. Two-operand form: `dst = dst OP src`.
+
+    /// `movss xmm_dst, xmm_src` — copy a 32-bit float between XMM regs.
+    Movssrr { dst: Reg, src: Reg },
+    /// `movss xmm_dst, [mem]` — load a 32-bit float from memory.
+    Movssrm { dst: Reg, src: Mem },
+    /// `movss [mem], xmm_src` — store a 32-bit float to memory.
+    Movssmr { dst: Mem, src: Reg },
+    /// `movsd xmm_dst, xmm_src` — copy a 64-bit float between XMM regs.
+    Movsdrr { dst: Reg, src: Reg },
+    /// `movsd xmm_dst, [mem]` — load a 64-bit float from memory.
+    Movsdrm { dst: Reg, src: Mem },
+    /// `movsd [mem], xmm_src` — store a 64-bit float to memory.
+    Movsdmr { dst: Mem, src: Reg },
+
+    Addssrr { dst: Reg, src: Reg },
+    Subssrr { dst: Reg, src: Reg },
+    Mulssrr { dst: Reg, src: Reg },
+    Divssrr { dst: Reg, src: Reg },
+    Addsdrr { dst: Reg, src: Reg },
+    Subsdrr { dst: Reg, src: Reg },
+    Mulsdrr { dst: Reg, src: Reg },
+    Divsdrr { dst: Reg, src: Reg },
+
+    /// `ucomiss` — unordered SSE comparison (F32). Sets EFLAGS; no GPR def.
+    Ucomissrr { lhs: Reg, rhs: Reg },
+    /// `ucomisd` — unordered SSE comparison (F64). Sets EFLAGS; no GPR def.
+    Ucomisdrr { lhs: Reg, rhs: Reg },
+
+    // ---- Atomic RMW primitives. ----
+    //
+    // These carry the LOCK prefix and model implicit RAX reads/writes
+    // explicitly so liveness sees the pin. The frontend is responsible
+    // for binding RAX-dependent operands via `reg_bind` / `RegDef`.
+
+    /// `lock xadd [mem], src` — atomic exchange-and-add. Stores
+    /// `old_mem + src` at `[mem]`; `src` receives `old_mem`. The vreg
+    /// `src` serves as both a use (pre-op value) and a def (post-op
+    /// old-mem value).
+    LockXadd64mr { dst: Mem, src: Reg },
+
+    /// `lock cmpxchg [mem], src` — compare-and-swap. If `[mem] == RAX`,
+    /// store `src` into `[mem]` and set ZF; else load `[mem]` into RAX
+    /// and clear ZF. `rax_in` holds the expected value at entry;
+    /// `rax_out` holds the observed `[mem]` after the op — both must be
+    /// pre-bound to RAX.
+    LockCmpxchg64mr {
+        dst: Mem,
+        src: Reg,
+        rax_in: Reg,
+        rax_out: Reg,
+    },
 }
 
 impl Inst for X64Inst {
@@ -287,7 +345,9 @@ impl Inst for X64Inst {
             | X64Inst::Movsx64r16 { src, .. }
             | X64Inst::Movsxd64r32 { src, .. }
             | X64Inst::Movzx64r8 { src, .. }
-            | X64Inst::Movzx64r16 { src, .. } => smallvec![*src],
+            | X64Inst::Movzx64r16 { src, .. }
+            | X64Inst::Movssrr { src, .. }
+            | X64Inst::Movsdrr { src, .. } => smallvec![*src],
             X64Inst::Mov64ri { .. }
             | X64Inst::Mov32ri { .. }
             | X64Inst::Mov16ri { .. }
@@ -297,13 +357,40 @@ impl Inst for X64Inst {
             | X64Inst::Mov32rm { src, .. }
             | X64Inst::Mov16rm { src, .. }
             | X64Inst::Mov8rm { src, .. }
+            | X64Inst::Movssrm { src, .. }
+            | X64Inst::Movsdrm { src, .. }
             | X64Inst::Lea64rm { src, .. } => src.get_uses(),
             X64Inst::Mov64mr { dst, src }
             | X64Inst::Mov32mr { dst, src }
             | X64Inst::Mov16mr { dst, src }
-            | X64Inst::Mov8mr { dst, src } => {
+            | X64Inst::Mov8mr { dst, src }
+            | X64Inst::Movssmr { dst, src }
+            | X64Inst::Movsdmr { dst, src } => {
                 let mut uses: SmallVec<[Reg; 2]> = dst.get_uses();
                 uses.push(*src);
+                uses
+            }
+            X64Inst::Addssrr { dst, src }
+            | X64Inst::Subssrr { dst, src }
+            | X64Inst::Mulssrr { dst, src }
+            | X64Inst::Divssrr { dst, src }
+            | X64Inst::Addsdrr { dst, src }
+            | X64Inst::Subsdrr { dst, src }
+            | X64Inst::Mulsdrr { dst, src }
+            | X64Inst::Divsdrr { dst, src } => smallvec![*dst, *src],
+            X64Inst::Ucomissrr { lhs, rhs } | X64Inst::Ucomisdrr { lhs, rhs } => {
+                smallvec![*lhs, *rhs]
+            }
+            X64Inst::LockXadd64mr { dst, src } => {
+                let mut uses: SmallVec<[Reg; 2]> = dst.get_uses();
+                uses.push(*src);
+                uses
+            }
+            X64Inst::LockCmpxchg64mr { dst, src, rax_in, .. } => {
+                // Uses: base(/index) + src + implicit RAX (via rax_in).
+                let mut uses: SmallVec<[Reg; 2]> = dst.get_uses();
+                uses.push(*src);
+                uses.push(*rax_in);
                 uses
             }
             X64Inst::Add64rr { dst, src }
@@ -388,21 +475,46 @@ impl Inst for X64Inst {
             | X64Inst::Sar64rcl { dst, .. }
             | X64Inst::Cmov64rr { dst, .. }
             | X64Inst::Setcc8r { dst, .. }
-            | X64Inst::LoadArgFromStack { dst, .. } => smallvec![*dst],
+            | X64Inst::LoadArgFromStack { dst, .. }
+            | X64Inst::Movssrr { dst, .. }
+            | X64Inst::Movssrm { dst, .. }
+            | X64Inst::Movsdrr { dst, .. }
+            | X64Inst::Movsdrm { dst, .. }
+            | X64Inst::Addssrr { dst, .. }
+            | X64Inst::Subssrr { dst, .. }
+            | X64Inst::Mulssrr { dst, .. }
+            | X64Inst::Divssrr { dst, .. }
+            | X64Inst::Addsdrr { dst, .. }
+            | X64Inst::Subsdrr { dst, .. }
+            | X64Inst::Mulsdrr { dst, .. }
+            | X64Inst::Divsdrr { dst, .. } => smallvec![*dst],
             X64Inst::Idiv64r { quotient, remainder, .. }
             | X64Inst::Div64r { quotient, remainder, .. } => {
                 let mut defs: SmallVec<[Reg; 1]> = smallvec![*quotient];
                 defs.push(*remainder);
                 defs
             }
+            // `xadd [mem], src` writes the old memory value back into
+            // `src`, so the vreg acts as both a use (pre-op value) and
+            // a def (post-op old-mem). Modeling the def is what keeps
+            // regalloc from reusing `src`'s preg before the emitter
+            // finishes the xadd.
+            X64Inst::LockXadd64mr { src, .. } => smallvec![*src],
+            // cmpxchg writes RAX unconditionally (the observed [mem]
+            // value); model it via `rax_out`.
+            X64Inst::LockCmpxchg64mr { rax_out, .. } => smallvec![*rax_out],
             X64Inst::Mov64mr { .. }
             | X64Inst::Mov32mr { .. }
             | X64Inst::Mov16mr { .. }
             | X64Inst::Mov8mr { .. }
+            | X64Inst::Movssmr { .. }
+            | X64Inst::Movsdmr { .. }
             | X64Inst::Cmp64rr { .. }
             | X64Inst::Cmp64ri32 { .. }
             | X64Inst::Test64rr { .. }
             | X64Inst::Test64ri32 { .. }
+            | X64Inst::Ucomissrr { .. }
+            | X64Inst::Ucomisdrr { .. }
             | X64Inst::Call64r { .. }
             | X64Inst::Jmp { .. }
             | X64Inst::CondJmp { .. }
@@ -584,6 +696,56 @@ impl Display for X64Inst {
             }
             X64Inst::AdjustRsp { delta } => write!(f, "adjust_rsp {delta}"),
             X64Inst::RawRet => f.write_str("ret"),
+            X64Inst::Movssrr { dst, src } => {
+                write!(f, "movss {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Movssrm { dst, src } => write!(f, "movss {}, {src}", reg_name(*dst)),
+            X64Inst::Movssmr { dst, src } => write!(f, "movss {dst}, {}", reg_name(*src)),
+            X64Inst::Movsdrr { dst, src } => {
+                write!(f, "movsd {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Movsdrm { dst, src } => write!(f, "movsd {}, {src}", reg_name(*dst)),
+            X64Inst::Movsdmr { dst, src } => write!(f, "movsd {dst}, {}", reg_name(*src)),
+            X64Inst::Addssrr { dst, src } => {
+                write!(f, "addss {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Subssrr { dst, src } => {
+                write!(f, "subss {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Mulssrr { dst, src } => {
+                write!(f, "mulss {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Divssrr { dst, src } => {
+                write!(f, "divss {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Addsdrr { dst, src } => {
+                write!(f, "addsd {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Subsdrr { dst, src } => {
+                write!(f, "subsd {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Mulsdrr { dst, src } => {
+                write!(f, "mulsd {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Divsdrr { dst, src } => {
+                write!(f, "divsd {}, {}", reg_name(*dst), reg_name(*src))
+            }
+            X64Inst::Ucomissrr { lhs, rhs } => {
+                write!(f, "ucomiss {}, {}", reg_name(*lhs), reg_name(*rhs))
+            }
+            X64Inst::Ucomisdrr { lhs, rhs } => {
+                write!(f, "ucomisd {}, {}", reg_name(*lhs), reg_name(*rhs))
+            }
+            X64Inst::LockXadd64mr { dst, src } => {
+                write!(f, "lock xadd {dst}, {}", reg_name(*src))
+            }
+            X64Inst::LockCmpxchg64mr { dst, src, rax_in, rax_out } => write!(
+                f,
+                "lock cmpxchg {dst}, {} ; rax_in={}, rax_out={}",
+                reg_name(*src),
+                reg_name(*rax_in),
+                reg_name(*rax_out)
+            ),
         }
     }
 }
@@ -903,6 +1065,105 @@ mod tests {
         assert_eq!(
             format!("{}", X64Inst::AdjustRsp { delta: 16 }),
             "adjust_rsp 16"
+        );
+    }
+
+    #[test]
+    fn fp_arith_uses_both_defs_dst() {
+        for inst in [
+            X64Inst::Addssrr { dst: 1, src: 2 },
+            X64Inst::Subssrr { dst: 1, src: 2 },
+            X64Inst::Mulssrr { dst: 1, src: 2 },
+            X64Inst::Divssrr { dst: 1, src: 2 },
+            X64Inst::Addsdrr { dst: 1, src: 2 },
+            X64Inst::Subsdrr { dst: 1, src: 2 },
+            X64Inst::Mulsdrr { dst: 1, src: 2 },
+            X64Inst::Divsdrr { dst: 1, src: 2 },
+        ] {
+            assert_eq!(inst.get_uses().as_slice(), &[1, 2]);
+            assert_eq!(inst.get_defs().as_slice(), &[1]);
+        }
+    }
+
+    #[test]
+    fn fp_mov_rr_uses_src_defs_dst() {
+        for inst in [
+            X64Inst::Movssrr { dst: 3, src: 4 },
+            X64Inst::Movsdrr { dst: 3, src: 4 },
+        ] {
+            assert_eq!(inst.get_uses().as_slice(), &[4]);
+            assert_eq!(inst.get_defs().as_slice(), &[3]);
+        }
+    }
+
+    #[test]
+    fn fp_compare_uses_both_defs_nothing() {
+        for inst in [
+            X64Inst::Ucomissrr { lhs: 2, rhs: 3 },
+            X64Inst::Ucomisdrr { lhs: 2, rhs: 3 },
+        ] {
+            assert_eq!(inst.get_uses().as_slice(), &[2, 3]);
+            assert!(inst.get_defs().is_empty());
+        }
+    }
+
+    #[test]
+    fn lock_xadd_uses_and_defs_src() {
+        let inst = X64Inst::LockXadd64mr {
+            dst: Mem::base(5),
+            src: 6,
+        };
+        // Uses: base(5) + src(6).
+        assert_eq!(inst.get_uses().as_slice(), &[5, 6]);
+        // Def: src is rewritten with the old memory value.
+        assert_eq!(inst.get_defs().as_slice(), &[6]);
+    }
+
+    #[test]
+    fn lock_cmpxchg_uses_base_src_rax_in_defs_rax_out() {
+        let inst = X64Inst::LockCmpxchg64mr {
+            dst: Mem::base(1),
+            src: 2,
+            rax_in: 3,
+            rax_out: 4,
+        };
+        // Uses: base(1), src(2), rax_in(3).
+        assert_eq!(inst.get_uses().as_slice(), &[1, 2, 3]);
+        // Def: rax_out(4).
+        assert_eq!(inst.get_defs().as_slice(), &[4]);
+    }
+
+    #[test]
+    fn fp_and_atomic_display_forms_match() {
+        assert_eq!(
+            format!("{}", X64Inst::Addsdrr { dst: 1, src: 2 }),
+            "addsd v1, v2"
+        );
+        assert_eq!(
+            format!("{}", X64Inst::Ucomissrr { lhs: 3, rhs: 4 }),
+            "ucomiss v3, v4"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                X64Inst::LockXadd64mr {
+                    dst: Mem::base(5),
+                    src: 6
+                }
+            ),
+            "lock xadd [v5], v6"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                X64Inst::LockCmpxchg64mr {
+                    dst: Mem::base_disp(1, 8),
+                    src: 2,
+                    rax_in: 3,
+                    rax_out: 4
+                }
+            ),
+            "lock cmpxchg [v1+8], v2 ; rax_in=v3, rax_out=v4"
         );
     }
 }

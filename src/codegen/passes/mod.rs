@@ -5,8 +5,10 @@
 //! x64, one regalloc); the trait infrastructure exists so multiple can
 //! coexist and be compared.
 
+pub mod aggregate_lowering;
 pub mod ssa_destruction;
 
+pub use aggregate_lowering::lower_aggregates;
 pub use ssa_destruction::destroy_ssa;
 
 use std::collections::HashMap;

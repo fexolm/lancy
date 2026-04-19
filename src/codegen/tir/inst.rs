@@ -1,7 +1,7 @@
 use smallvec::{smallvec, SmallVec};
 use std::fmt::{Debug, Display, Formatter};
 
-use super::Reg;
+use super::{AggregateId, Reg};
 use crate::codegen::tir::Block;
 use crate::slotmap_key;
 
@@ -103,6 +103,23 @@ pub enum PseudoInstruction {
     /// are equivalent and honored. A vreg pinned by both must agree —
     /// the allocator panics on disagreement. Erased after allocation.
     RegDef { vreg: Reg, preg: Reg },
+
+    /// Define `dst` as an SSA aggregate with the element list at
+    /// `Func::aggregate_operands(id)`. Erased by the aggregate-lowering
+    /// pass — neither machine code nor regalloc state needs to track
+    /// the aggregate handle itself.
+    MakeAggregate { dst: Reg, id: AggregateId },
+
+    /// Extract scalar element `idx` of aggregate `agg`. Lowered to a
+    /// `Copy { dst, src: agg.elems[idx] }` by the aggregate-lowering
+    /// pass.
+    ExtractValue { dst: Reg, agg: Reg, idx: u32 },
+
+    /// Produce a new aggregate `dst` identical to `agg` except that
+    /// element `idx` is replaced by `val`. Lowered by the aggregate
+    /// pass: the destination gets a fresh element list that reuses
+    /// every unchanged element vreg and substitutes `val` at `idx`.
+    InsertValue { dst: Reg, agg: Reg, val: Reg, idx: u32 },
 }
 
 impl Display for PseudoInstruction {
@@ -131,6 +148,22 @@ impl Display for PseudoInstruction {
             PseudoInstruction::RegDef { vreg, preg } => {
                 write!(f, "regdef {} = p{preg}", reg_name(*vreg))
             }
+            PseudoInstruction::MakeAggregate { dst, id } => {
+                write!(f, "{} = make_aggregate {id}", reg_name(*dst))
+            }
+            PseudoInstruction::ExtractValue { dst, agg, idx } => write!(
+                f,
+                "{} = extractvalue {} [{idx}]",
+                reg_name(*dst),
+                reg_name(*agg)
+            ),
+            PseudoInstruction::InsertValue { dst, agg, val, idx } => write!(
+                f,
+                "{} = insertvalue {} [{idx}] <- {}",
+                reg_name(*dst),
+                reg_name(*agg),
+                reg_name(*val)
+            ),
         }
     }
 }
@@ -150,10 +183,14 @@ impl Inst for PseudoInstruction {
                 smallvec![*src]
             }
             PseudoInstruction::Kill { src } => smallvec![*src],
-            // Phi and CallPseudo uses live in the side table on `Func`.
-            // Callers that need those operands (SSA destruction, ABI
-            // lowering) consult `Func::phi_operands` / `call_operands`
-            // directly rather than going through `get_uses`.
+            PseudoInstruction::ExtractValue { agg, .. } => smallvec![*agg],
+            PseudoInstruction::InsertValue { agg, val, .. } => smallvec![*agg, *val],
+            // Phi, CallPseudo, and MakeAggregate uses live in side tables
+            // on `Func`. Callers that need those operands (SSA destruction,
+            // ABI lowering, aggregate lowering) consult
+            // `Func::phi_operands` / `call_operands` /
+            // `aggregate_operands` directly rather than going through
+            // `get_uses`.
             PseudoInstruction::Arg { .. }
             | PseudoInstruction::Phi { .. }
             | PseudoInstruction::StackAlloc { .. }
@@ -161,7 +198,8 @@ impl Inst for PseudoInstruction {
             | PseudoInstruction::FrameSetup
             | PseudoInstruction::FrameDestroy
             | PseudoInstruction::ImplicitDef { .. }
-            | PseudoInstruction::RegDef { .. } => smallvec![],
+            | PseudoInstruction::RegDef { .. }
+            | PseudoInstruction::MakeAggregate { .. } => smallvec![],
         }
     }
 
@@ -171,7 +209,10 @@ impl Inst for PseudoInstruction {
             | PseudoInstruction::Copy { dst, .. }
             | PseudoInstruction::Phi { dst, .. }
             | PseudoInstruction::StackAlloc { dst, .. }
-            | PseudoInstruction::ImplicitDef { dst } => smallvec![*dst],
+            | PseudoInstruction::ImplicitDef { dst }
+            | PseudoInstruction::MakeAggregate { dst, .. }
+            | PseudoInstruction::ExtractValue { dst, .. }
+            | PseudoInstruction::InsertValue { dst, .. } => smallvec![*dst],
             PseudoInstruction::RegDef { vreg, .. } => smallvec![*vreg],
             PseudoInstruction::Return { .. }
             | PseudoInstruction::CallPseudo { .. }
@@ -383,6 +424,63 @@ mod tests {
         let p = PseudoInstruction::RegDef { vreg: 3, preg: 1 };
         assert_eq!(p.get_defs().as_slice(), &[3]);
         assert!(p.get_uses().is_empty());
+    }
+
+    #[test]
+    fn pseudo_make_aggregate_defs_dst_uses_nothing_in_inst() {
+        // MakeAggregate's operand list lives in the side table; the
+        // `get_uses` result is empty by design.
+        let p = PseudoInstruction::MakeAggregate {
+            dst: 4,
+            id: AggregateId::new(0),
+        };
+        assert_eq!(p.get_defs().as_slice(), &[4]);
+        assert!(p.get_uses().is_empty());
+    }
+
+    #[test]
+    fn pseudo_extract_value_uses_agg_defs_dst() {
+        let p = PseudoInstruction::ExtractValue {
+            dst: 5,
+            agg: 7,
+            idx: 2,
+        };
+        assert_eq!(p.get_defs().as_slice(), &[5]);
+        assert_eq!(p.get_uses().as_slice(), &[7]);
+    }
+
+    #[test]
+    fn pseudo_insert_value_uses_agg_and_val_defs_dst() {
+        let p = PseudoInstruction::InsertValue {
+            dst: 1,
+            agg: 2,
+            val: 3,
+            idx: 0,
+        };
+        assert_eq!(p.get_defs().as_slice(), &[1]);
+        assert_eq!(p.get_uses().as_slice(), &[2, 3]);
+    }
+
+    #[test]
+    fn pseudo_aggregate_display_forms_are_stable() {
+        let m = PseudoInstruction::MakeAggregate {
+            dst: 4,
+            id: AggregateId::new(0),
+        };
+        assert_eq!(format!("{m}"), "v4 = make_aggregate agg#0");
+        let e = PseudoInstruction::ExtractValue {
+            dst: 5,
+            agg: 7,
+            idx: 2,
+        };
+        assert_eq!(format!("{e}"), "v5 = extractvalue v7 [2]");
+        let i = PseudoInstruction::InsertValue {
+            dst: 1,
+            agg: 2,
+            val: 3,
+            idx: 0,
+        };
+        assert_eq!(format!("{i}"), "v1 = insertvalue v2 [0] <- v3");
     }
 
     #[test]

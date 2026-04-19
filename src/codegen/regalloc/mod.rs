@@ -118,16 +118,23 @@ impl RegAllocResult {
 ///
 /// * `preg_count` — size of the physical register space; `Reg` values in the
 ///   allocation result are < this.
-/// * `allocatable_regs` — the subset allocators may hand out. Ordered roughly
-///   by preference (caller-saved first).
-/// * `scratch_regs` — reserved for the MC emitter's spill reload/spill
-///   scratch. Must not overlap `allocatable_regs`.
+/// * `allocatable_regs` — GPR-class pool (integer / pointer vregs). Ordered
+///   roughly by preference (callee-saved last so caller-saved wins on ties).
+/// * `scratch_regs` — GPR scratches reserved for the MC emitter's spill
+///   reload/spill. Must not overlap `allocatable_regs`.
+/// * `allocatable_fp_regs` — XMM-class pool (float / vector vregs). Routed by
+///   `Func::vreg_type(v).is_fp_or_vector()`. May be empty if the frontend
+///   doesn't emit any FP vregs.
+/// * `scratch_fp_regs` — XMM scratches for FP spill reload/spill. Similar
+///   disjointness rule.
 /// * `reg_bind` — pre-binds: `vreg -> preg` constraints. The allocator must
 ///   honor these even if it means evicting.
 pub struct RegAllocConfig {
     pub preg_count: usize,
     pub allocatable_regs: Vec<Reg>,
     pub scratch_regs: Vec<Reg>,
+    pub allocatable_fp_regs: Vec<Reg>,
+    pub scratch_fp_regs: Vec<Reg>,
     pub reg_bind: HashMap<Reg, Reg>,
 }
 

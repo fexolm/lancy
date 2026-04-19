@@ -42,7 +42,7 @@ use crate::codegen::analysis::liveness::{LiveRanges, Segment};
 use crate::codegen::regalloc::{
     AllocatedSlot, Assignment, RegAllocConfig, RegAllocResult, RegAllocator, SplitMove, StackSlot,
 };
-use crate::codegen::tir::{Func, Inst, Instruction, PseudoInstruction, Reg};
+use crate::codegen::tir::{Func, Inst, Instruction, PseudoInstruction, Reg, Type};
 use crate::support::slotmap::SecondaryMap;
 
 pub struct LinearScan;
@@ -54,7 +54,8 @@ impl<I: Inst> RegAllocator<I> for LinearScan {
     }
 }
 
-struct Allocator<'a> {
+struct Allocator<'a, I: Inst> {
+    func: &'a Func<I>,
     config: &'a RegAllocConfig,
     ranges: LiveRanges,
     copy_src: SecondaryMap<Reg, Option<Reg>>,
@@ -82,8 +83,8 @@ struct Allocator<'a> {
     split_moves: Vec<SplitMove>,
 }
 
-impl<'a> Allocator<'a> {
-    fn new<I: Inst>(
+impl<'a, I: Inst> Allocator<'a, I> {
+    fn new(
         func: &'a Func<I>,
         cfg: &'a CFG,
         layout: &'a BlockLayout,
@@ -95,7 +96,18 @@ impl<'a> Allocator<'a> {
         let n = func.get_regs_count();
         let mut assignments = SecondaryMap::new(n);
         assignments.fill(Assignment::default());
+        // Aggregate vregs must be erased before regalloc; catch stale
+        // survivors in debug builds rather than miscoloring them.
+        #[cfg(debug_assertions)]
+        for i in 0..n {
+            let t = func.vreg_type(i as Reg);
+            assert!(
+                !matches!(t, Type::Agg(_)) || ranges[i as Reg].is_empty(),
+                "aggregate vreg {i} reached regalloc — lower_aggregates must run first"
+            );
+        }
         Self {
+            func,
             config,
             ranges,
             copy_src,
@@ -108,6 +120,22 @@ impl<'a> Allocator<'a> {
             frame_layout: Vec::new(),
             split_moves: Vec::new(),
         }
+    }
+
+    fn is_fp(&self, v: Reg) -> bool {
+        self.func.vreg_type(v).is_fp_or_vector()
+    }
+
+    fn pool_for(&self, v: Reg) -> &[Reg] {
+        if self.is_fp(v) {
+            &self.config.allocatable_fp_regs
+        } else {
+            &self.config.allocatable_regs
+        }
+    }
+
+    fn same_class(&self, a: Reg, b: Reg) -> bool {
+        self.is_fp(a) == self.is_fp(b)
     }
 
     fn run(mut self) -> RegAllocResult {
@@ -193,6 +221,7 @@ impl<'a> Allocator<'a> {
         let blocked_at = self.compute_blocked_at(v, position);
 
         if let Some(hint) = self.copy_hint(v)
+            && self.pool_for(v).contains(&hint)
             && blocked_at.get(&hint).copied().unwrap_or(0) >= v_end
         {
             self.assign_fresh_reg(v, hint);
@@ -200,8 +229,7 @@ impl<'a> Allocator<'a> {
         }
 
         let best = self
-            .config
-            .allocatable_regs
+            .pool_for(v)
             .iter()
             .map(|&p| (p, blocked_at.get(&p).copied().unwrap_or(0)))
             .max_by_key(|&(_, fu)| fu);
@@ -226,10 +254,13 @@ impl<'a> Allocator<'a> {
 
     fn compute_blocked_at(&self, v: Reg, position: ProgramPoint) -> HashMap<Reg, ProgramPoint> {
         let mut blocked_at: HashMap<Reg, ProgramPoint> = HashMap::new();
-        for &p in &self.config.allocatable_regs {
+        for &p in self.pool_for(v) {
             blocked_at.insert(p, ProgramPoint::MAX);
         }
         for &u in &self.active {
+            if !self.same_class(u, v) {
+                continue;
+            }
             let p = self.current_preg(u);
             if blocked_at.contains_key(&p) {
                 blocked_at.insert(p, position);
@@ -237,6 +268,9 @@ impl<'a> Allocator<'a> {
         }
         let v_range = &self.ranges[v];
         for &u in &self.inactive {
+            if !self.same_class(u, v) {
+                continue;
+            }
             let p = self.current_preg(u);
             if !blocked_at.contains_key(&p) {
                 continue;
@@ -259,26 +293,45 @@ impl<'a> Allocator<'a> {
         let v_range = &self.ranges[v];
         let mut best: Option<(Reg, Reg, ProgramPoint)> = None;
 
-        for &p in &self.config.allocatable_regs {
-            let mut blockers: Vec<Reg> = Vec::new();
+        for &p in self.pool_for(v) {
+            // Sole-blocker detection: count and keep the last witness.
+            // Any preg with 0 or >=2 blockers is skipped.
+            let mut count: u32 = 0;
+            let mut only: Reg = 0;
             for &w in &self.active {
+                if !self.same_class(w, v) {
+                    continue;
+                }
                 if self.current_preg(w) == p {
-                    blockers.push(w);
+                    count += 1;
+                    only = w;
+                    if count > 1 {
+                        break;
+                    }
                 }
             }
-            for &w in &self.inactive {
-                if self.current_preg(w) == p
-                    && self.ranges[w]
-                        .next_intersection_at_or_after(v_range, position)
-                        .is_some()
-                {
-                    blockers.push(w);
+            if count <= 1 {
+                for &w in &self.inactive {
+                    if !self.same_class(w, v) {
+                        continue;
+                    }
+                    if self.current_preg(w) == p
+                        && self.ranges[w]
+                            .next_intersection_at_or_after(v_range, position)
+                            .is_some()
+                    {
+                        count += 1;
+                        only = w;
+                        if count > 1 {
+                            break;
+                        }
+                    }
                 }
             }
-            if blockers.len() != 1 {
+            if count != 1 {
                 continue;
             }
-            let u = blockers[0];
+            let u = only;
             if self.effective_binds.contains_key(&u) {
                 continue;
             }
@@ -299,11 +352,17 @@ impl<'a> Allocator<'a> {
         let mut seen = std::collections::HashSet::new();
         let mut conflicts: Vec<Reg> = Vec::new();
         for &u in &self.active {
+            if !self.same_class(u, v) {
+                continue;
+            }
             if self.current_preg(u) == target && seen.insert(u) {
                 conflicts.push(u);
             }
         }
         for &u in &self.inactive {
+            if !self.same_class(u, v) {
+                continue;
+            }
             if self.current_preg(u) == target
                 && self.ranges[u]
                     .next_intersection_at_or_after(v_range, position)
@@ -332,6 +391,7 @@ impl<'a> Allocator<'a> {
         let mut visited = [u32::MAX; 16];
         visited[0] = v;
         let mut n = 1;
+        let pool = self.pool_for(v);
         while n < visited.len() {
             if visited[..n].contains(&cur) {
                 return None;
@@ -342,7 +402,7 @@ impl<'a> Allocator<'a> {
                 .current_slot
                 .get(cur as usize)
                 .and_then(|s| s.as_ref())
-                && self.config.allocatable_regs.contains(p)
+                && pool.contains(p)
             {
                 return Some(*p);
             }
@@ -562,6 +622,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RAX, RBX, RCX, RDX],
             scratch_regs: vec![R12, R13],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind,
         }
     }
@@ -591,6 +653,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RDI, RAX, RBX, RCX],
             scratch_regs: vec![R12, R13],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind,
         };
         let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);
@@ -621,6 +685,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RDI, RAX, RBX, RCX],
             scratch_regs: vec![R12, R13],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind,
         };
         let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);
@@ -677,6 +743,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RAX],
             scratch_regs: vec![RBX, R12, R13],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind,
         };
         let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);
@@ -713,6 +781,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RAX, RBX],
             scratch_regs: vec![R12, R13],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind: HashMap::new(),
         };
         let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);

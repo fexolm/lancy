@@ -9,10 +9,11 @@ use crate::codegen::isa::x64::inst::X64Inst;
 use crate::codegen::isa::x64::mc::emit_mc::FnMCWriter;
 use crate::codegen::isa::x64::passes::abi_lower::SysVAmd64Lowering;
 use crate::codegen::isa::x64::regs::{
-    R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBX, RCX, RDI, RDX, RSI,
+    R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBX, RCX, RDI, RDX, RSI, XMM0, XMM1, XMM10,
+    XMM11, XMM12, XMM13, XMM14, XMM15, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9,
 };
 use crate::codegen::jit::{Module, Relocation};
-use crate::codegen::passes::{AbiLowering, destroy_ssa};
+use crate::codegen::passes::{AbiLowering, destroy_ssa, lower_aggregates};
 use crate::codegen::regalloc::{LinearScan, RegAllocConfig, RegAllocator};
 use crate::codegen::tir::{Func, Reg};
 use std::collections::HashMap;
@@ -36,6 +37,15 @@ pub fn default_ra_config(reg_bind: HashMap<Reg, Reg>) -> RegAllocConfig {
         preg_count: 32,
         allocatable_regs: vec![R14, R15, RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11],
         scratch_regs: vec![RBX, R12, R13],
+        // XMM0..XMM13 allocatable; XMM14/XMM15 reserved as FP spill
+        // scratches (an rr op with both operands spilled needs two
+        // distinct XMM scratches). All XMMs are caller-saved under
+        // SysV, so no prologue push/pop is needed.
+        allocatable_fp_regs: vec![
+            XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12,
+            XMM13,
+        ],
+        scratch_fp_regs: vec![XMM14, XMM15],
         reg_bind,
     }
 }
@@ -58,6 +68,10 @@ pub fn compile(func: Func<X64Inst>) -> Vec<u8> {
 #[must_use]
 pub fn compile_full(mut func: Func<X64Inst>) -> Compiled {
     let name = func.name().to_string();
+    // Aggregate pseudos first: they rewrite into plain Copies, which
+    // every later pass already understands. Must run before SSA
+    // destruction so the aggregate vregs don't leak into phi lists.
+    lower_aggregates(&mut func);
     // Phi → parallel Copies before anything else. Subsequent passes
     // assume the IR is phi-free.
     destroy_ssa(&mut func);
@@ -1539,5 +1553,267 @@ mod tests {
         let f: FnI64I64_I64 = unsafe { m.entry() };
         assert_eq!(unsafe { f(100, 40) }, 60);
         assert_eq!(unsafe { f(40, 100) }, -60);
+    }
+
+    // -----------------------------------------------------------------
+    // Floating-point, atomic, and aggregate JIT tests.
+    // -----------------------------------------------------------------
+
+    use crate::codegen::tir::Type;
+
+    #[allow(non_camel_case_types)]
+    type FnF64F64_F64 = unsafe extern "sysv64" fn(f64, f64) -> f64;
+    #[allow(non_camel_case_types)]
+    type FnF32F32_F32 = unsafe extern "sysv64" fn(f32, f32) -> f32;
+
+    #[test]
+    fn jit_fadd_f64_two_args() {
+        let mut b = FuncBuilder::new("fadd_f64");
+        let x = b.arg_typed(Type::F64);
+        let y = b.arg_typed(Type::F64);
+        let r = b.fadd_f64(x, y);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        let f: FnF64F64_F64 = unsafe { m.entry() };
+        assert!((unsafe { f(1.5, 2.25) } - 3.75).abs() < 1e-9);
+        assert!((unsafe { f(-3.0, 3.0) }).abs() < 1e-9);
+        let v = unsafe { f(1e308, 1e308) };
+        assert!(v.is_infinite() && v > 0.0);
+    }
+
+    #[test]
+    fn jit_fmul_fdiv_f64() {
+        let mut b = FuncBuilder::new("fmd");
+        let x = b.arg_typed(Type::F64);
+        let y = b.arg_typed(Type::F64);
+        let p = b.fmul_f64(x, y);
+        let q = b.fdiv_f64(p, y);
+        b.ret(q);
+        let m = jit(b.build()).unwrap();
+        let f: FnF64F64_F64 = unsafe { m.entry() };
+        // (x*y)/y ≈ x for nonzero y.
+        assert!((unsafe { f(6.0, 2.0) } - 6.0).abs() < 1e-9);
+        assert!((unsafe { f(7.5, 1.25) } - 7.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jit_fsub_f32_two_args() {
+        let mut b = FuncBuilder::new("fsub_f32");
+        let x = b.arg_typed(Type::F32);
+        let y = b.arg_typed(Type::F32);
+        let r = b.fsub_f32(x, y);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        let f: FnF32F32_F32 = unsafe { m.entry() };
+        assert!((unsafe { f(5.0, 3.0) } - 2.0).abs() < 1e-6);
+        assert!((unsafe { f(0.0, 1.0) } + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn jit_atomic_fetch_add_on_caller_slot() {
+        // Callee takes `base` pointer and `delta`, returns old value;
+        // memory is incremented atomically.
+        let mut b = FuncBuilder::new("fetch_add");
+        let base = b.arg();
+        let delta = b.arg();
+        let old = b.atomic_fetch_add_i64(base, 0, delta);
+        b.ret(old);
+        let m = jit(b.build()).unwrap();
+        type F = unsafe extern "sysv64" fn(*mut i64, i64) -> i64;
+        let f: F = unsafe { m.entry() };
+        let mut cell: i64 = 100;
+        let old_v = unsafe { f(&raw mut cell, 5) };
+        assert_eq!(old_v, 100);
+        assert_eq!(cell, 105);
+        let old_v2 = unsafe { f(&raw mut cell, -30) };
+        assert_eq!(old_v2, 105);
+        assert_eq!(cell, 75);
+    }
+
+    #[test]
+    fn jit_atomic_cmpxchg_swap_succeeds_and_fails() {
+        // fn(p, expected, desired) -> witness.
+        let mut b = FuncBuilder::new("cmpxchg");
+        let p = b.arg();
+        let exp = b.arg();
+        let des = b.arg();
+        let (w, _success) = b.atomic_cmpxchg_i64(p, 0, exp, des);
+        b.ret(w);
+        let m = jit(b.build()).unwrap();
+        type F = unsafe extern "sysv64" fn(*mut i64, i64, i64) -> i64;
+        let f: F = unsafe { m.entry() };
+        let mut cell: i64 = 42;
+        // Success: witness equals expected, memory updated.
+        let w = unsafe { f(&raw mut cell, 42, 99) };
+        assert_eq!(w, 42);
+        assert_eq!(cell, 99);
+        // Failure: witness is current memory (99), memory unchanged.
+        let w = unsafe { f(&raw mut cell, 42, 7) };
+        assert_eq!(w, 99);
+        assert_eq!(cell, 99);
+    }
+
+    #[test]
+    fn jit_atomic_cmpxchg_success_flag_is_zf_of_comparison() {
+        // fn(p, expected, desired) -> success_byte (1 on swap, 0 else).
+        let mut b = FuncBuilder::new("cmpxchg_flag");
+        let p = b.arg();
+        let exp = b.arg();
+        let des = b.arg();
+        let (_w, success) = b.atomic_cmpxchg_i64(p, 0, exp, des);
+        b.ret(success);
+        let m = jit(b.build()).unwrap();
+        type F = unsafe extern "sysv64" fn(*mut i64, i64, i64) -> i64;
+        let f: F = unsafe { m.entry() };
+        let mut cell: i64 = 10;
+        assert_eq!(unsafe { f(&raw mut cell, 10, 77) }, 1, "swap should set flag");
+        assert_eq!(cell, 77);
+        assert_eq!(
+            unsafe { f(&raw mut cell, 999, 1) },
+            0,
+            "mismatched expected should clear flag"
+        );
+        assert_eq!(cell, 77, "memory unchanged on failure");
+    }
+
+    #[test]
+    fn jit_aggregate_extract_roundtrips_first_element() {
+        // Build an aggregate {x, y}, return the first element.
+        let mut b = FuncBuilder::new("agg_first");
+        let x = b.arg();
+        let y = b.arg();
+        let agg = b.make_aggregate(vec![x, y]);
+        let out = b.extract_value(agg, 0, Type::I64);
+        b.ret(out);
+        let m = jit(b.build()).unwrap();
+        let f: FnI64I64_I64 = unsafe { m.entry() };
+        assert_eq!(unsafe { f(7, 99) }, 7);
+        assert_eq!(unsafe { f(-1, 42) }, -1);
+    }
+
+    #[test]
+    fn jit_aggregate_insert_value_replaces_element() {
+        // Build {x, y}, insert z at index 1, return element 1 → z.
+        let mut b = FuncBuilder::new("agg_insert");
+        let x = b.arg();
+        let y = b.arg();
+        let z = b.arg();
+        let agg0 = b.make_aggregate(vec![x, y]);
+        let agg1 = b.insert_value(agg0, z, 1);
+        let out = b.extract_value(agg1, 1, Type::I64);
+        b.ret(out);
+        let m = jit(b.build()).unwrap();
+        type F3 = unsafe extern "sysv64" fn(i64, i64, i64) -> i64;
+        let f: F3 = unsafe { m.entry() };
+        assert_eq!(unsafe { f(10, 20, 30) }, 30);
+    }
+
+    #[test]
+    fn jit_fp_pressure_forces_spill_and_produces_correct_result() {
+        // Make a reduction across many FP vregs that all need to be
+        // simultaneously live just before the final sum, creating
+        // pressure past the 14-XMM allocatable pool. The allocator
+        // should spill one or more via SplitMove, the emitter's fixed
+        // FP split-store path must survive, and the final value must
+        // match the oracle.
+        //
+        // We simulate pressure by building a long chain of
+        // independent `fadd`s: dst = a + a + a + … where each addend
+        // is a fresh load from memory, preventing the allocator from
+        // collapsing them onto a single register across the sequence.
+        // The arg is passed in XMM0, so we read [base], [base+8], …
+        // into separate F64 vregs and accumulate.
+        let mut b = FuncBuilder::new("fp_pressure");
+        let base = b.arg(); // pointer arg, integer class
+        // Load 20 separate FP values into independent vregs, then
+        // build a sum tree keeping every leaf live until the final
+        // fadd runs. This forces > 14 concurrent XMM vregs.
+        let n: i32 = 20;
+        let mut leaves: Vec<Reg> = (0..n)
+            .map(|i| b.load_f64(base, i * 8))
+            .collect();
+        // Reduce pairwise but reverse-order so each initial leaf stays
+        // live until the end, maximizing simultaneous liveness.
+        while leaves.len() > 1 {
+            let mid = leaves.len() / 2;
+            let mut next = Vec::with_capacity(mid);
+            for i in 0..mid {
+                let s = b.fadd_f64(leaves[i], leaves[leaves.len() - 1 - i]);
+                next.push(s);
+            }
+            if leaves.len() % 2 == 1 {
+                next.push(leaves[mid]);
+            }
+            leaves = next;
+        }
+        b.ret(leaves[0]);
+        let m = jit(b.build()).unwrap();
+        type F = unsafe extern "sysv64" fn(*const f64) -> f64;
+        let f: F = unsafe { m.entry() };
+        let data: Vec<f64> = (0..n).map(|i| f64::from(i) * 0.25 + 1.0).collect();
+        let got = unsafe { f(data.as_ptr()) };
+        let want: f64 = data.iter().sum();
+        assert!(
+            (got - want).abs() < 1e-9,
+            "fp pressure: got {got}, want {want}"
+        );
+    }
+
+    #[test]
+    fn jit_call_with_fp_arg_and_fp_return_round_trips_via_sysv() {
+        // A direct JIT-ed callee that takes two f64 args and returns
+        // f64 exercises the XMM0/XMM1 arg routing and XMM0 return
+        // routing through `lower_call`. The caller just forwards its
+        // own f64 args to the callee — any mis-routing (e.g. shim
+        // pinned to RDI instead of XMM0) would clobber the payload.
+        use crate::codegen::tir::Type;
+
+        // Callee: fn(a: f64, b: f64) -> f64 { a * b + a }
+        let mut cb = FuncBuilder::new("fp_callee");
+        let a = cb.arg_typed(Type::F64);
+        let c = cb.arg_typed(Type::F64);
+        let p = cb.fmul_f64(a, c);
+        let r = cb.fadd_f64(p, a);
+        cb.ret(r);
+        let callee_mod = jit(cb.build()).unwrap();
+        type FCallee = unsafe extern "sysv64" fn(f64, f64) -> f64;
+        let callee_fp: FCallee = unsafe { callee_mod.entry() };
+        // Sanity check the callee directly first.
+        assert!((unsafe { callee_fp(2.0, 3.0) } - 8.0).abs() < 1e-9);
+
+        // Caller: receives the callee's address as an integer arg plus
+        // two f64s, forwards both f64 args through an indirect call.
+        // Correct FP routing is what makes the values survive.
+        let mut b = FuncBuilder::new("fp_caller");
+        let fn_ptr = b.arg(); // integer pointer arg
+        let x = b.arg_typed(Type::F64);
+        let y = b.arg_typed(Type::F64);
+        let res = b.call_indirect_typed(fn_ptr, &[x, y], Type::F64);
+        b.ret(res);
+        let caller_mod = jit(b.build()).unwrap();
+        type FCaller = unsafe extern "sysv64" fn(*const std::ffi::c_void, f64, f64) -> f64;
+        let caller_fp: FCaller = unsafe { caller_mod.entry() };
+        let addr = callee_fp as *const std::ffi::c_void;
+        let got = unsafe { caller_fp(addr, 2.5, 4.0) };
+        // Expect callee(2.5, 4.0) = 2.5 * 4.0 + 2.5 = 12.5.
+        assert!((got - 12.5).abs() < 1e-9, "fp call returned {got}");
+    }
+
+    #[test]
+    fn jit_aggregate_insert_preserves_unchanged_element() {
+        // Build {x, y, z}, insert w at index 1, return element 2 → z.
+        let mut b = FuncBuilder::new("agg_unchanged");
+        let x = b.arg();
+        let y = b.arg();
+        let z = b.arg();
+        let w = b.arg();
+        let agg0 = b.make_aggregate(vec![x, y, z]);
+        let agg1 = b.insert_value(agg0, w, 1);
+        let out = b.extract_value(agg1, 2, Type::I64);
+        b.ret(out);
+        let m = jit(b.build()).unwrap();
+        type F4 = unsafe extern "sysv64" fn(i64, i64, i64, i64) -> i64;
+        let f: F4 = unsafe { m.entry() };
+        assert_eq!(unsafe { f(1, 2, 3, 4) }, 3);
     }
 }

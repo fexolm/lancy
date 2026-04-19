@@ -21,10 +21,13 @@
 use std::collections::HashMap;
 
 use crate::codegen::isa::x64::inst::X64Inst;
-use crate::codegen::isa::x64::regs::{R10, R11, RAX};
-use crate::codegen::isa::x64::sysv::{INT_ARG_REGS, SysVAmd64};
+use crate::codegen::isa::x64::regs::{
+    R10, R11, RAX, XMM0, XMM1, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, XMM2, XMM3, XMM4, XMM5,
+    XMM6, XMM7, XMM8, XMM9,
+};
+use crate::codegen::isa::x64::sysv::{FP_ARG_REGS, INT_ARG_REGS, SysVAmd64};
 use crate::codegen::passes::{AbiLowering, AbiLowerResult, CallSite};
-use crate::codegen::tir::{CallTarget, Func, Instruction, PseudoInstruction, Reg};
+use crate::codegen::tir::{CallTarget, Func, Instruction, PseudoInstruction, Reg, Type};
 
 pub struct SysVAmd64Lowering;
 
@@ -35,14 +38,42 @@ impl AbiLowering<X64Inst> for SysVAmd64Lowering {
         let mut call_sites: Vec<CallSite> = Vec::new();
         let block_ids: Vec<_> = func.blocks_iter().map(|(b, _)| b).collect();
 
+        // SysV gives integer and FP args separate position counters.
+        // Walk entry-block Arg pseudos in declaration order and map
+        // each `idx` into its class-relative counter.
+        let mut int_pos: u32 = 0;
+        let mut fp_pos: u32 = 0;
+
         for block in block_ids {
             let old = func.get_block_data_mut(block).take_insts();
             let mut new: Vec<Instruction<X64Inst>> = Vec::with_capacity(old.len());
             for inst in old {
                 match inst {
                     Instruction::Pseudo(PseudoInstruction::Arg { dst, idx }) => {
-                        if let Some(preg) = cc.int_arg_reg(idx) {
-                            let shim = func.new_vreg();
+                        let is_fp = func.vreg_type(dst).is_fp_or_vector();
+                        if is_fp {
+                            if let Some(preg) = cc.fp_arg_reg(fp_pos) {
+                                let shim = func.new_typed_vreg(func.vreg_type(dst));
+                                reg_bind.insert(shim, preg);
+                                new.push(Instruction::Pseudo(PseudoInstruction::Arg {
+                                    dst: shim,
+                                    idx,
+                                }));
+                                new.push(Instruction::Pseudo(PseudoInstruction::Copy {
+                                    dst,
+                                    src: shim,
+                                }));
+                                fp_pos += 1;
+                            } else {
+                                // Stack-passed FP args — unsupported today;
+                                // the frontend should cap FP arg count at 8.
+                                panic!(
+                                    "more than {} FP args: stack-passed FP args unimplemented",
+                                    cc.max_fp_args_in_regs()
+                                );
+                            }
+                        } else if let Some(preg) = cc.int_arg_reg(int_pos) {
+                            let shim = func.new_typed_vreg(func.vreg_type(dst));
                             reg_bind.insert(shim, preg);
                             new.push(Instruction::Pseudo(PseudoInstruction::Arg {
                                 dst: shim,
@@ -52,22 +83,26 @@ impl AbiLowering<X64Inst> for SysVAmd64Lowering {
                                 dst,
                                 src: shim,
                             }));
+                            int_pos += 1;
                         } else {
-                            // Stack-passed argument (idx >= 6 for SysV).
-                            // The caller placed the value at a rbp-relative
-                            // offset above the saved registers; emit a
-                            // dedicated load. Indexing from 0 relative to
-                            // the first stack-passed arg.
-                            let stack_idx = idx - cc.max_int_args_in_regs();
+                            // Stack-passed integer argument.
+                            let stack_idx = int_pos - cc.max_int_args_in_regs();
                             new.push(Instruction::Target(X64Inst::LoadArgFromStack {
                                 dst,
                                 stack_idx,
                             }));
+                            int_pos += 1;
                         }
                     }
                     Instruction::Pseudo(PseudoInstruction::Return { src }) => {
-                        let ret_vreg = func.new_vreg();
-                        reg_bind.insert(ret_vreg, cc.int_ret_reg());
+                        let src_ty = func.vreg_type(src);
+                        let (ret_preg, ret_ty) = if src_ty.is_fp_or_vector() {
+                            (cc.fp_ret_reg(), src_ty)
+                        } else {
+                            (cc.int_ret_reg(), Type::I64)
+                        };
+                        let ret_vreg = func.new_typed_vreg(ret_ty);
+                        reg_bind.insert(ret_vreg, ret_preg);
                         new.push(Instruction::Pseudo(PseudoInstruction::Copy {
                             dst: ret_vreg,
                             src,
@@ -110,9 +145,44 @@ fn lower_call(
         "multiple-return calls not yet supported"
     );
 
-    // Split arguments into register-passed and stack-passed halves.
-    let reg_arg_count = args.len().min(INT_ARG_REGS.len());
-    let stack_arg_count = args.len().saturating_sub(INT_ARG_REGS.len());
+    // Walk args once, partitioning into int vs FP class and assigning
+    // class-relative register indices. Each class gets its own pool
+    // and its own position counter, matching SysV. Stack-passed args
+    // (int past 6, FP past 8) go into the stack area below.
+    #[derive(Copy, Clone)]
+    enum ArgSlot {
+        IntReg(Reg),
+        FpReg(Reg),
+        /// Stack arg index, zero-based from the first stack-passed arg.
+        IntStack(u32),
+    }
+
+    let mut slots: Vec<(Reg, ArgSlot)> = Vec::with_capacity(args.len());
+    let mut int_pos: u32 = 0;
+    let mut fp_pos: u32 = 0;
+    let mut stack_idx_counter: u32 = 0;
+    for &user_arg in &args {
+        let is_fp = func.vreg_type(user_arg).is_fp_or_vector();
+        if is_fp {
+            if let Some(preg) = FP_ARG_REGS.get(fp_pos as usize).copied() {
+                slots.push((user_arg, ArgSlot::FpReg(preg)));
+                fp_pos += 1;
+            } else {
+                panic!(
+                    "more than {} FP call args: stack-passed FP args unimplemented",
+                    FP_ARG_REGS.len()
+                );
+            }
+        } else if let Some(preg) = INT_ARG_REGS.get(int_pos as usize).copied() {
+            slots.push((user_arg, ArgSlot::IntReg(preg)));
+            int_pos += 1;
+        } else {
+            slots.push((user_arg, ArgSlot::IntStack(stack_idx_counter)));
+            stack_idx_counter += 1;
+        }
+    }
+
+    let stack_arg_count = stack_idx_counter as usize;
 
     // Reserve a 16-byte-aligned outgoing-args area. Rsp is 16-aligned
     // on entry to this call (the function prologue established that,
@@ -124,57 +194,64 @@ fn lower_call(
         new.push(Instruction::Target(X64Inst::AdjustRsp { delta: -reserved }));
     }
 
-    // Emit stack-arg stores (writes to `[rsp + 8*stack_idx]`). Order
-    // within the outgoing area: the 7th arg at the lowest address —
-    // matching the SysV layout so the callee sees it at `[rbp+16+…]`.
-    // These stores are after the AdjustRsp so `[rsp+i*8]` refers to
-    // the freshly reserved region.
-    for (i, user_arg) in args.iter().copied().enumerate().skip(INT_ARG_REGS.len()) {
-        let stack_idx = (i - INT_ARG_REGS.len()) as u32;
-        new.push(Instruction::Target(X64Inst::StoreStackArg {
-            src: user_arg,
-            stack_idx,
-        }));
-    }
-
-    // Copy each user-arg vreg into a fresh shim vreg pinned to the
-    // SysV arg preg. The shim's life is from Copy to Call64r, so it
-    // occupies the arg preg across that window.
-    let mut arg_shims: Vec<Reg> = Vec::with_capacity(reg_arg_count);
-    for (i, user_arg) in args.iter().copied().take(reg_arg_count).enumerate() {
-        let shim = func.new_vreg();
-        reg_bind.insert(shim, INT_ARG_REGS[i]);
-        new.push(Instruction::Pseudo(PseudoInstruction::Copy {
-            dst: shim,
-            src: user_arg,
-        }));
-        arg_shims.push(shim);
-    }
-
-    // Clobber markers for caller-saved pregs NOT holding the first
-    // `reg_arg_count` arg regs. Each clobber vreg is defined and
-    // pinned to its preg at a point right before the call's target
-    // load — any user vreg still live in that preg must get evicted /
-    // split-spilled ahead of this point so the JIT-callee can stomp
-    // on the preg freely.
-    //
-    for &preg in &[R10, R11] {
-        emit_clobber(func, new, reg_bind, preg);
-    }
-    for (i, &arg_preg) in INT_ARG_REGS.iter().enumerate() {
-        if i >= reg_arg_count {
-            emit_clobber(func, new, reg_bind, arg_preg);
+    // Emit stack-arg stores (writes to `[rsp + 8*stack_idx]`).
+    for (user_arg, slot) in &slots {
+        if let ArgSlot::IntStack(stack_idx) = slot {
+            new.push(Instruction::Target(X64Inst::StoreStackArg {
+                src: *user_arg,
+                stack_idx: *stack_idx,
+            }));
         }
     }
-    emit_clobber(func, new, reg_bind, RAX);
 
-    // Load callee address. The immediate is a placeholder the loader
-    // patches at Module::load time.
-    let addr_vreg = func.new_vreg();
-    new.push(Instruction::Target(X64Inst::Mov64ri {
-        dst: addr_vreg,
-        imm: 0, // placeholder, patched at load time
-    }));
+    // Copy each user-arg vreg into a fresh shim pinned to the
+    // appropriate arg preg; the shim lives from Copy to Call64r.
+    for (user_arg, slot) in &slots {
+        let preg = match *slot {
+            ArgSlot::IntReg(p) | ArgSlot::FpReg(p) => p,
+            ArgSlot::IntStack(_) => continue,
+        };
+        let shim = func.new_typed_vreg(func.vreg_type(*user_arg));
+        reg_bind.insert(shim, preg);
+        new.push(Instruction::Pseudo(PseudoInstruction::Copy {
+            dst: shim,
+            src: *user_arg,
+        }));
+    }
+
+    // Clobber every caller-saved preg NOT holding an arg shim.
+    // R10/R11/RAX are always caller-saved and never int arg regs.
+    // Int arg regs past `int_pos` and all XMMs past `fp_pos` are free.
+    for &preg in &[R10, R11] {
+        emit_clobber(func, new, reg_bind, preg, Type::I64);
+    }
+    for &arg_preg in &INT_ARG_REGS[int_pos as usize..] {
+        emit_clobber(func, new, reg_bind, arg_preg, Type::I64);
+    }
+    let all_xmms = [
+        XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13,
+        XMM14, XMM15,
+    ];
+    for &preg in &all_xmms[fp_pos as usize..] {
+        emit_clobber(func, new, reg_bind, preg, Type::F64);
+    }
+    emit_clobber(func, new, reg_bind, RAX, Type::I64);
+
+    // Callee address: for direct (symbol) calls we materialize a
+    // placeholder `Mov64ri 0` that the loader patches at load time;
+    // for indirect calls we already have the address in the user's
+    // `fn_ptr` vreg and just thread it into `Call64r` unchanged.
+    let addr_vreg = match &call_data.callee {
+        CallTarget::Symbol(_) => {
+            let v = func.new_vreg();
+            new.push(Instruction::Target(X64Inst::Mov64ri {
+                dst: v,
+                imm: 0, // placeholder, patched at load time
+            }));
+            v
+        }
+        CallTarget::Indirect(fn_ptr) => *fn_ptr,
+    };
 
     // Emit the call.
     new.push(Instruction::Target(X64Inst::Call64r { target: addr_vreg }));
@@ -185,14 +262,20 @@ fn lower_call(
         new.push(Instruction::Target(X64Inst::AdjustRsp { delta: reserved }));
     }
 
-    // Extract the return value: define ret_shim pinned to RAX, copy
-    // into the user's return vreg.
+    // Extract the return value: define ret_shim pinned to RAX (int) or
+    // XMM0 (FP), copy into the user's return vreg.
     if let Some(&user_ret) = rets.first() {
-        let ret_shim = func.new_vreg();
-        reg_bind.insert(ret_shim, RAX);
+        let user_ret_ty = func.vreg_type(user_ret);
+        let (ret_preg, shim_ty) = if user_ret_ty.is_fp_or_vector() {
+            (XMM0, user_ret_ty)
+        } else {
+            (RAX, user_ret_ty)
+        };
+        let ret_shim = func.new_typed_vreg(shim_ty);
+        reg_bind.insert(ret_shim, ret_preg);
         new.push(Instruction::Pseudo(PseudoInstruction::RegDef {
             vreg: ret_shim,
-            preg: RAX,
+            preg: ret_preg,
         }));
         new.push(Instruction::Pseudo(PseudoInstruction::Copy {
             dst: user_ret,
@@ -208,19 +291,20 @@ fn lower_call(
     call_sites.push(CallSite { addr_vreg, symbol });
 }
 
+/// Emit a caller-saved clobber marker. Caller passes `ty` so the
+/// allocator routes the clobber into the right class pool (`I64` for
+/// GPR, `F64` for XMM).
 fn emit_clobber(
     func: &mut Func<X64Inst>,
     new: &mut Vec<Instruction<X64Inst>>,
     reg_bind: &mut HashMap<Reg, Reg>,
     preg: Reg,
+    ty: Type,
 ) {
-    let v = func.new_vreg();
+    let v = func.new_typed_vreg(ty);
     reg_bind.insert(v, preg);
     new.push(Instruction::Pseudo(PseudoInstruction::ImplicitDef { dst: v }));
-    new.push(Instruction::Pseudo(PseudoInstruction::RegDef {
-        vreg: v,
-        preg,
-    }));
+    new.push(Instruction::Pseudo(PseudoInstruction::RegDef { vreg: v, preg }));
 }
 
 #[cfg(test)]

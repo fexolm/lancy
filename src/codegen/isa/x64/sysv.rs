@@ -12,12 +12,18 @@
 //! and any practical consumer of this module also consumes the x64 ISA.
 
 use crate::codegen::isa::x64::regs::{
-    R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI,
+    R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI, XMM0, XMM1, XMM2,
+    XMM3, XMM4, XMM5, XMM6, XMM7,
 };
 use crate::codegen::tir::Reg;
 
 pub const INT_ARG_REGS: &[Reg] = &[RDI, RSI, RDX, RCX, R8, R9];
 pub const INT_RET_REG: Reg = RAX;
+
+/// XMM registers used for floating-point/vector arguments under SysV.
+pub const FP_ARG_REGS: &[Reg] = &[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7];
+/// Floating-point return register: the first XMM.
+pub const FP_RET_REG: Reg = XMM0;
 
 pub const CALLEE_SAVED: &[Reg] = &[RBX, RBP, R12, R13, R14, R15];
 pub const CALLER_SAVED: &[Reg] = &[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11];
@@ -39,14 +45,32 @@ impl SysVAmd64 {
         INT_ARG_REGS.get(idx as usize).copied()
     }
 
+    /// XMM register used for float/vector argument `idx` in the SSE
+    /// class. Independent of the integer-class counter — SysV gives the
+    /// two classes separate counting pools.
+    #[must_use]
+    pub fn fp_arg_reg(self, idx: u32) -> Option<Reg> {
+        FP_ARG_REGS.get(idx as usize).copied()
+    }
+
     #[must_use]
     pub fn int_ret_reg(self) -> Reg {
         INT_RET_REG
     }
 
     #[must_use]
+    pub fn fp_ret_reg(self) -> Reg {
+        FP_RET_REG
+    }
+
+    #[must_use]
     pub fn max_int_args_in_regs(self) -> u32 {
         INT_ARG_REGS.len() as u32
+    }
+
+    #[must_use]
+    pub fn max_fp_args_in_regs(self) -> u32 {
+        FP_ARG_REGS.len() as u32
     }
 }
 

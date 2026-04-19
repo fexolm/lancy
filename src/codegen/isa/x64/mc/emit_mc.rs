@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use crate::codegen::analysis::layout::{BlockLayout, ProgramPoint};
 use crate::codegen::isa::x64::inst::{Cond, X64Inst};
 use crate::codegen::isa::x64::regs::{
-    R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP,
+    R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, XMM0, XMM1,
+    XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9,
+    is_xmm,
 };
 use crate::codegen::isa::x64::sysv::CALLEE_SAVED;
 use crate::codegen::regalloc::{
@@ -34,10 +36,12 @@ use iced_x86::code_asm::registers::{
     cl, r10, r10b, r10d, r10w, r11, r11b, r11d, r11w, r12, r12b, r12d, r12w, r13, r13b, r13d,
     r13w, r14, r14b, r14d, r14w, r15, r15b, r15d, r15w, r8, r8b, r8d, r8w, r9, r9b, r9d, r9w,
     rax, rbp, rbx, rcx, rdi, rdx, rsi, rsp, al, ax, bl, bp, bpl, bx, cx, di, dil, dl, dx, eax,
-    ebp, ebx, ecx, edi, edx, esi, esp, si, sil, sp, spl,
+    ebp, ebx, ecx, edi, edx, esi, esp, si, sil, sp, spl, xmm0, xmm1, xmm10, xmm11, xmm12, xmm13,
+    xmm14, xmm15, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8, xmm9,
 };
 use iced_x86::code_asm::{
-    AsmRegister16, AsmRegister32, AsmRegister64, AsmRegister8, CodeAssembler, CodeLabel,
+    AsmRegister16, AsmRegister32, AsmRegister64, AsmRegister8, AsmRegisterXmm, CodeAssembler,
+    CodeLabel,
 };
 use std::collections::BTreeSet;
 
@@ -129,6 +133,40 @@ fn scratch_demand_of(inst: &X64Inst) -> usize {
         // `StoreStackArg` reads from `src`; if spilled we need one
         // scratch to load the value before storing to `[rsp+disp]`.
         X64Inst::StoreStackArg { .. } => 1,
+        // Scalar FP rr ops need no GPR scratches — XMM spills reload
+        // directly into another XMM, which we never handle here.
+        X64Inst::Movssrr { .. }
+        | X64Inst::Movsdrr { .. }
+        | X64Inst::Addssrr { .. }
+        | X64Inst::Subssrr { .. }
+        | X64Inst::Mulssrr { .. }
+        | X64Inst::Divssrr { .. }
+        | X64Inst::Addsdrr { .. }
+        | X64Inst::Subsdrr { .. }
+        | X64Inst::Mulsdrr { .. }
+        | X64Inst::Divsdrr { .. }
+        | X64Inst::Ucomissrr { .. }
+        | X64Inst::Ucomisdrr { .. } => 0,
+        // FP memory ops need one GPR scratch if the base operand spills.
+        X64Inst::Movssrm { src, .. } | X64Inst::Movsdrm { src, .. }
+            if src.index.is_some() =>
+        {
+            2
+        }
+        X64Inst::Movssmr { dst, .. } | X64Inst::Movsdmr { dst, .. }
+            if dst.index.is_some() =>
+        {
+            2
+        }
+        X64Inst::Movssrm { .. }
+        | X64Inst::Movsdrm { .. }
+        | X64Inst::Movssmr { .. }
+        | X64Inst::Movsdmr { .. } => 1,
+        // lock xadd / cmpxchg: the src and the address; up to 2 scratches.
+        X64Inst::LockXadd64mr { dst, .. } if dst.index.is_some() => 3,
+        X64Inst::LockXadd64mr { .. } => 2,
+        X64Inst::LockCmpxchg64mr { dst, .. } if dst.index.is_some() => 3,
+        X64Inst::LockCmpxchg64mr { .. } => 2,
     }
 }
 
@@ -195,6 +233,28 @@ fn to_ice_reg16(r: Reg) -> AsmRegister16 {
         R14 => r14w,
         R15 => r15w,
         other => panic!("to_ice_reg16: unsupported reg index {other}"),
+    }
+}
+
+fn to_ice_xmm(r: Reg) -> AsmRegisterXmm {
+    match r {
+        XMM0 => xmm0,
+        XMM1 => xmm1,
+        XMM2 => xmm2,
+        XMM3 => xmm3,
+        XMM4 => xmm4,
+        XMM5 => xmm5,
+        XMM6 => xmm6,
+        XMM7 => xmm7,
+        XMM8 => xmm8,
+        XMM9 => xmm9,
+        XMM10 => xmm10,
+        XMM11 => xmm11,
+        XMM12 => xmm12,
+        XMM13 => xmm13,
+        XMM14 => xmm14,
+        XMM15 => xmm15,
+        other => panic!("to_ice_xmm: unsupported xmm reg index {other}"),
     }
 }
 
@@ -441,6 +501,81 @@ impl<'i> FnMCWriter<'i> {
         }
     }
 
+    fn scratch_fp(&self, idx: usize) -> AsmRegisterXmm {
+        assert!(
+            idx < self.ra_cfg.scratch_fp_regs.len(),
+            "MC emitter asked for XMM scratch #{idx} but RegAllocConfig only provides {} FP \
+             scratch(es). FP spill/reload needs at least one.",
+            self.ra_cfg.scratch_fp_regs.len()
+        );
+        to_ice_xmm(self.ra_cfg.scratch_fp_regs[idx])
+    }
+
+    /// Load an XMM operand into a physical XMM register. If the vreg is
+    /// on the stack, load into the given scratch XMM via `movsd`
+    /// (64-bit FP load, also valid for 32-bit floats — the upper bytes
+    /// of the stack slot are don't-care for scalar FP arithmetic).
+    fn load_fp_use(&mut self, vreg: Reg, pt: ProgramPoint, scratch_idx: usize) -> AsmRegisterXmm {
+        match self.slot_of(vreg, pt) {
+            AllocatedSlot::Reg(r) => {
+                assert!(
+                    is_xmm(r),
+                    "FP vreg {vreg} landed in GPR preg {r}; regalloc must route FP to XMM pool"
+                );
+                to_ice_xmm(r)
+            }
+            AllocatedSlot::Stack(slot) => {
+                let s = self.scratch_fp(scratch_idx);
+                self.asm
+                    .movsd_2(s, rbp + i64::from(Self::slot_offset(slot)))
+                    .expect("movsd-load from slot");
+                s
+            }
+        }
+    }
+
+    fn prepare_fp_def(
+        &mut self,
+        vreg: Reg,
+        pt: ProgramPoint,
+        scratch_idx: usize,
+    ) -> AsmRegisterXmm {
+        match self.slot_of(vreg, pt) {
+            AllocatedSlot::Reg(r) => {
+                assert!(is_xmm(r), "FP vreg {vreg} landed in GPR preg {r}");
+                to_ice_xmm(r)
+            }
+            AllocatedSlot::Stack(_) => self.scratch_fp(scratch_idx),
+        }
+    }
+
+    fn store_fp_def(&mut self, vreg: Reg, pt: ProgramPoint, scratch_idx: usize) {
+        if let AllocatedSlot::Stack(slot) = self.slot_of(vreg, pt) {
+            self.asm
+                .movsd_2(rbp + i64::from(Self::slot_offset(slot)), self.scratch_fp(scratch_idx))
+                .expect("movsd-store to slot");
+        }
+    }
+
+
+    /// `dst` is both read (at `use_pt`) and written (at `def_pt`) — XMM
+    /// variant of `emit_rr_op`. Used by the scalar-FP arithmetic ops.
+    fn emit_fp_rr_op<F>(
+        &mut self,
+        dst: Reg,
+        src: Reg,
+        use_pt: ProgramPoint,
+        def_pt: ProgramPoint,
+        op: F,
+    ) where
+        F: FnOnce(&mut CodeAssembler, AsmRegisterXmm, AsmRegisterXmm),
+    {
+        let dst_r = self.load_fp_use(dst, use_pt, 0);
+        let src_r = self.load_fp_use(src, use_pt, 1);
+        op(&mut self.asm, dst_r, src_r);
+        self.store_fp_def(dst, def_pt, 0);
+    }
+
     /// `dst` is both read (at `use_pt`) and written (at `def_pt`).
     fn emit_rr_op<F>(&mut self, dst: Reg, src: Reg, use_pt: ProgramPoint, def_pt: ProgramPoint, op: F)
     where
@@ -485,13 +620,20 @@ impl<'i> FnMCWriter<'i> {
 
     /// Emit any split-store moves pending at this instruction's def-point.
     /// These preserve the evicted vreg's value before the new owner
-    /// overwrites the preg.
+    /// overwrites the preg. Routes by class: GPR pregs use `mov`,
+    /// XMM pregs use `movsd` (64-bit FP store, correct for both F32
+    /// and F64 slots since the allocator reserves 8 bytes either way).
     fn emit_pending_splits(&mut self, def_pt: ProgramPoint) {
         let Some(moves) = self.splits_by_point.get(&def_pt).cloned() else { return };
         for sm in moves {
-            let reg = to_ice_reg(sm.from_preg);
             let off = i64::from(Self::slot_offset(sm.to_slot));
-            self.asm.mov(rbp + off, reg).expect("split-store");
+            if is_xmm(sm.from_preg) {
+                let reg = to_ice_xmm(sm.from_preg);
+                self.asm.movsd_2(rbp + off, reg).expect("split-store xmm");
+            } else {
+                let reg = to_ice_reg(sm.from_preg);
+                self.asm.mov(rbp + off, reg).expect("split-store");
+            }
         }
     }
 
@@ -988,6 +1130,168 @@ impl<'i> FnMCWriter<'i> {
                 }
             }
             X64Inst::RawRet => self.emit_epilogue(),
+
+            // ---- Scalar FP moves. ----
+            X64Inst::Movssrr { dst, src } => {
+                // Coalesced?
+                if let (AllocatedSlot::Reg(a), AllocatedSlot::Reg(b)) =
+                    (self.slot_of(dst, def_pt), self.slot_of(src, use_pt))
+                    && a == b
+                {
+                    return;
+                }
+                let src_r = self.load_fp_use(src, use_pt, 1);
+                let dst_r = self.prepare_fp_def(dst, def_pt, 0);
+                self.asm.movss(dst_r, src_r).expect("movss rr");
+                self.store_fp_def(dst, def_pt, 0);
+            }
+            X64Inst::Movssrm { dst, src } => {
+                let base_r = self.load_use(src.base, use_pt, 1);
+                let dst_r = self.prepare_fp_def(dst, def_pt, 0);
+                if let Some(idx) = src.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    self.asm
+                        .movss(dst_r, base_r + idx_r * i32::from(src.scale) + src.disp)
+                        .expect("movss r, [mem]");
+                } else {
+                    self.asm
+                        .movss(dst_r, base_r + i64::from(src.disp))
+                        .expect("movss r, [mem]");
+                }
+                self.store_fp_def(dst, def_pt, 0);
+            }
+            X64Inst::Movssmr { dst, src } => {
+                let base_r = self.load_use(dst.base, use_pt, 0);
+                let src_r = self.load_fp_use(src, use_pt, 0);
+                if let Some(idx) = dst.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    self.asm
+                        .movss(base_r + idx_r * i32::from(dst.scale) + dst.disp, src_r)
+                        .expect("movss [mem], r");
+                } else {
+                    self.asm
+                        .movss(base_r + i64::from(dst.disp), src_r)
+                        .expect("movss [mem], r");
+                }
+            }
+            X64Inst::Movsdrr { dst, src } => {
+                if let (AllocatedSlot::Reg(a), AllocatedSlot::Reg(b)) =
+                    (self.slot_of(dst, def_pt), self.slot_of(src, use_pt))
+                    && a == b
+                {
+                    return;
+                }
+                let src_r = self.load_fp_use(src, use_pt, 1);
+                let dst_r = self.prepare_fp_def(dst, def_pt, 0);
+                self.asm.movsd_2(dst_r, src_r).expect("movsd rr");
+                self.store_fp_def(dst, def_pt, 0);
+            }
+            X64Inst::Movsdrm { dst, src } => {
+                let base_r = self.load_use(src.base, use_pt, 1);
+                let dst_r = self.prepare_fp_def(dst, def_pt, 0);
+                if let Some(idx) = src.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    self.asm
+                        .movsd_2(dst_r, base_r + idx_r * i32::from(src.scale) + src.disp)
+                        .expect("movsd r, [mem]");
+                } else {
+                    self.asm
+                        .movsd_2(dst_r, base_r + i64::from(src.disp))
+                        .expect("movsd r, [mem]");
+                }
+                self.store_fp_def(dst, def_pt, 0);
+            }
+            X64Inst::Movsdmr { dst, src } => {
+                let base_r = self.load_use(dst.base, use_pt, 0);
+                let src_r = self.load_fp_use(src, use_pt, 0);
+                if let Some(idx) = dst.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    self.asm
+                        .movsd_2(base_r + idx_r * i32::from(dst.scale) + dst.disp, src_r)
+                        .expect("movsd [mem], r");
+                } else {
+                    self.asm
+                        .movsd_2(base_r + i64::from(dst.disp), src_r)
+                        .expect("movsd [mem], r");
+                }
+            }
+
+            // ---- Scalar FP arithmetic. ----
+            X64Inst::Addssrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.addss(d, s).expect("addss rr");
+            }),
+            X64Inst::Subssrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.subss(d, s).expect("subss rr");
+            }),
+            X64Inst::Mulssrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.mulss(d, s).expect("mulss rr");
+            }),
+            X64Inst::Divssrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.divss(d, s).expect("divss rr");
+            }),
+            X64Inst::Addsdrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.addsd(d, s).expect("addsd rr");
+            }),
+            X64Inst::Subsdrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.subsd(d, s).expect("subsd rr");
+            }),
+            X64Inst::Mulsdrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.mulsd(d, s).expect("mulsd rr");
+            }),
+            X64Inst::Divsdrr { dst, src } => self.emit_fp_rr_op(dst, src, use_pt, def_pt, |a, d, s| {
+                a.divsd(d, s).expect("divsd rr");
+            }),
+
+            // ---- FP comparisons — set EFLAGS, no GPR def. ----
+            X64Inst::Ucomissrr { lhs, rhs } => {
+                let l = self.load_fp_use(lhs, use_pt, 0);
+                let r = self.load_fp_use(rhs, use_pt, 1);
+                self.asm.ucomiss(l, r).expect("ucomiss");
+            }
+            X64Inst::Ucomisdrr { lhs, rhs } => {
+                let l = self.load_fp_use(lhs, use_pt, 0);
+                let r = self.load_fp_use(rhs, use_pt, 1);
+                self.asm.ucomisd(l, r).expect("ucomisd");
+            }
+
+            // ---- Atomic RMW. ----
+            X64Inst::LockXadd64mr { dst, src } => {
+                // xadd rewrites `src` in place with [mem]'s old value.
+                let src_r = self.load_use(src, use_pt, 1);
+                let base_r = self.load_use(dst.base, use_pt, 0);
+                if let Some(idx) = dst.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    let _ = self.asm.lock();
+                    self.asm
+                        .xadd(base_r + idx_r * i32::from(dst.scale) + dst.disp, src_r)
+                        .expect("lock xadd [mem], r");
+                } else {
+                    let _ = self.asm.lock();
+                    self.asm
+                        .xadd(base_r + i64::from(dst.disp), src_r)
+                        .expect("lock xadd [mem], r");
+                }
+                self.store_def(src, def_pt, 1);
+            }
+            X64Inst::LockCmpxchg64mr { dst, src, .. } => {
+                // Emitter assumes regalloc placed rax_in / rax_out on RAX;
+                // iced emits `cmpxchg [mem], src` which reads and writes RAX
+                // implicitly. The lock prefix enforces atomicity.
+                let src_r = self.load_use(src, use_pt, 1);
+                let base_r = self.load_use(dst.base, use_pt, 0);
+                if let Some(idx) = dst.index {
+                    let idx_r = self.load_use(idx, use_pt, 2);
+                    let _ = self.asm.lock();
+                    self.asm
+                        .cmpxchg(base_r + idx_r * i32::from(dst.scale) + dst.disp, src_r)
+                        .expect("lock cmpxchg [mem], r");
+                } else {
+                    let _ = self.asm.lock();
+                    self.asm
+                        .cmpxchg(base_r + i64::from(dst.disp), src_r)
+                        .expect("lock cmpxchg [mem], r");
+                }
+            }
         }
     }
 
@@ -1022,23 +1326,47 @@ impl<'i> FnMCWriter<'i> {
             PseudoInstruction::Copy { dst, src } => {
                 let src_slot = self.slot_of(src, use_pt);
                 let dst_slot = self.slot_of(dst, def_pt);
-                // Coalesced on the same preg → no-op.
+                // Coalesced on the same preg → no-op (same whether int
+                // or FP class).
                 if let (AllocatedSlot::Reg(a), AllocatedSlot::Reg(b)) = (dst_slot, src_slot)
                     && a == b
                 {
                     return;
                 }
-                // Otherwise emit Mov64rr semantics using the live slots.
-                let src_r = self.load_use(src, use_pt, 1);
-                match dst_slot {
-                    AllocatedSlot::Reg(r) => {
-                        let dst_r = to_ice_reg(r);
-                        self.asm.mov(dst_r, src_r).expect("copy: mov rr");
+                // Route by class: FP Copy → movsd, int Copy → mov.
+                debug_assert_eq!(
+                    self.func.vreg_type(dst).is_fp_or_vector(),
+                    self.func.vreg_type(src).is_fp_or_vector(),
+                    "Copy crosses reg classes: dst={dst} src={src}"
+                );
+                let fp = self.func.vreg_type(dst).is_fp_or_vector();
+                if fp {
+                    let src_r = self.load_fp_use(src, use_pt, 1);
+                    match dst_slot {
+                        AllocatedSlot::Reg(r) => {
+                            assert!(is_xmm(r), "FP copy landed in GPR {r}");
+                            self.asm
+                                .movsd_2(to_ice_xmm(r), src_r)
+                                .expect("copy: movsd rr");
+                        }
+                        AllocatedSlot::Stack(slot) => {
+                            self.asm
+                                .movsd_2(rbp + i64::from(Self::slot_offset(slot)), src_r)
+                                .expect("copy: movsd slot, r");
+                        }
                     }
-                    AllocatedSlot::Stack(slot) => {
-                        self.asm
-                            .mov(rbp + i64::from(Self::slot_offset(slot)), src_r)
-                            .expect("copy: mov slot, r");
+                } else {
+                    let src_r = self.load_use(src, use_pt, 1);
+                    match dst_slot {
+                        AllocatedSlot::Reg(r) => {
+                            let dst_r = to_ice_reg(r);
+                            self.asm.mov(dst_r, src_r).expect("copy: mov rr");
+                        }
+                        AllocatedSlot::Stack(slot) => {
+                            self.asm
+                                .mov(rbp + i64::from(Self::slot_offset(slot)), src_r)
+                                .expect("copy: mov slot, r");
+                        }
                     }
                 }
             }
@@ -1071,6 +1399,14 @@ impl<'i> FnMCWriter<'i> {
                 // No separate pseudo_cleanup pass runs today. These pseudos
                 // carry regalloc-only information (pins, undef defs,
                 // explicit live-range endpoints) and emit no machine code.
+            }
+            PseudoInstruction::MakeAggregate { .. }
+            | PseudoInstruction::ExtractValue { .. }
+            | PseudoInstruction::InsertValue { .. } => {
+                panic!(
+                    "aggregate pseudos should have been lowered by lower_aggregates \
+                     before MC emission"
+                );
             }
         }
     }
@@ -1224,10 +1560,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn test_ra_config(reg_bind: HashMap<Reg, Reg>) -> RegAllocConfig {
+        use crate::codegen::isa::x64::regs::{
+            XMM0, XMM1, XMM10, XMM11, XMM12, XMM13, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8,
+            XMM9, XMM14, XMM15,
+        };
         RegAllocConfig {
             preg_count: 32,
             allocatable_regs: vec![RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11],
             scratch_regs: vec![RBX, R12, R13],
+            allocatable_fp_regs: vec![
+                XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7, XMM8, XMM9, XMM10, XMM11,
+                XMM12, XMM13,
+            ],
+            scratch_fp_regs: vec![XMM14, XMM15],
             reg_bind,
         }
     }
@@ -1263,6 +1608,8 @@ mod tests {
             preg_count: 32,
             allocatable_regs: vec![RAX],
             scratch_regs: vec![],
+            allocatable_fp_regs: Vec::new(),
+            scratch_fp_regs: Vec::new(),
             reg_bind: HashMap::new(),
         };
         let empty_ra = RegAllocResult {

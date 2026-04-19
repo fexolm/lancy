@@ -3,7 +3,9 @@ use std::fmt::Display;
 
 use crate::support::slotmap::{Key, PrimaryMap};
 
-use super::{Block, BlockData, CallData, CallId, Inst, PhiData, PhiId};
+use super::{
+    AggregateData, AggregateId, Block, BlockData, CallData, CallId, Inst, PhiData, PhiId, Type,
+};
 
 pub type Reg = u32;
 
@@ -12,7 +14,12 @@ pub struct Func<I: Inst> {
     blocks: PrimaryMap<Block, BlockData<I>>,
     phis: PrimaryMap<PhiId, PhiData>,
     calls: PrimaryMap<CallId, CallData>,
+    aggregates: PrimaryMap<AggregateId, AggregateData>,
     regs_count: u32,
+    /// Type of each vreg, indexed by reg id. Populated by `new_vreg`.
+    /// Regalloc consults this to pick the correct physical-register
+    /// class (GPR for integer/pointer, XMM/YMM/ZMM for floats/vectors).
+    reg_types: Vec<Type>,
     /// Frontend-declared pre-bindings: `vreg -> preg` pins that the
     /// allocator must honor for the vreg's whole life. Typically used
     /// for ABI-visible shims (arg/ret registers, IDIV's RAX/RDX, shift
@@ -31,6 +38,8 @@ impl<I: Inst> Func<I> {
             blocks: PrimaryMap::new(),
             phis: PrimaryMap::new(),
             calls: PrimaryMap::new(),
+            aggregates: PrimaryMap::new(),
+            reg_types: Vec::new(),
             pre_binds: HashMap::new(),
         }
     }
@@ -52,10 +61,28 @@ impl<I: Inst> Func<I> {
         &self.blocks[block]
     }
 
+    /// Allocate a fresh vreg with the default type (`I64`). Kept for
+    /// call sites that don't yet pipe a type through; prefer
+    /// `new_typed_vreg` in new code so the allocator can pick the right
+    /// register class.
     pub fn new_vreg(&mut self) -> Reg {
+        self.new_typed_vreg(Type::I64)
+    }
+
+    /// Allocate a fresh vreg typed as `ty`. The type persists for the
+    /// vreg's entire life.
+    pub fn new_typed_vreg(&mut self, ty: Type) -> Reg {
         let res = self.regs_count;
         self.regs_count += 1;
+        self.reg_types.push(ty);
         res
+    }
+
+    /// Return the type stamped on `reg` at `new_vreg` / `new_typed_vreg`.
+    /// Panics on out-of-bounds; `reg` must come from this `Func`.
+    #[must_use]
+    pub fn vreg_type(&self, reg: Reg) -> Type {
+        self.reg_types[reg as usize]
     }
 
     #[must_use]
@@ -134,6 +161,24 @@ impl<I: Inst> Func<I> {
     pub fn pre_binds(&self) -> &HashMap<Reg, Reg> {
         &self.pre_binds
     }
+
+    /// Register an SSA aggregate with initial element vregs. Returns an
+    /// id to stamp into `PseudoInstruction::MakeAggregate { id }` or
+    /// `InsertValue { agg_id }`. Element vregs should already exist and
+    /// are referenced by value — the aggregate doesn't take ownership.
+    pub fn new_aggregate(&mut self, elems: Vec<Reg>) -> AggregateId {
+        self.aggregates.insert(AggregateData { elems })
+    }
+
+    #[must_use]
+    pub fn aggregate_operands(&self, id: AggregateId) -> &AggregateData {
+        &self.aggregates[id]
+    }
+
+    #[must_use]
+    pub fn has_aggregates(&self) -> bool {
+        !self.aggregates.is_empty()
+    }
 }
 
 impl<I: Inst> Display for Func<I> {
@@ -207,6 +252,33 @@ mod tests {
         assert!(matches!(&data.callee, CallTarget::Symbol(s) if s == "puts"));
         assert_eq!(data.args, vec![v0, v1]);
         assert_eq!(data.rets, vec![ret]);
+    }
+
+    #[test]
+    fn new_vreg_defaults_to_i64_type() {
+        let mut func = Func::<X64Inst>::new("t".into());
+        let v = func.new_vreg();
+        assert_eq!(func.vreg_type(v), Type::I64);
+    }
+
+    #[test]
+    fn new_typed_vreg_stamps_its_type() {
+        let mut func = Func::<X64Inst>::new("t".into());
+        let a = func.new_typed_vreg(Type::F32);
+        let b = func.new_typed_vreg(Type::Ptr);
+        let c = func.new_typed_vreg(Type::I8);
+        assert_eq!(func.vreg_type(a), Type::F32);
+        assert_eq!(func.vreg_type(b), Type::Ptr);
+        assert_eq!(func.vreg_type(c), Type::I8);
+    }
+
+    #[test]
+    fn new_aggregate_round_trips_element_list() {
+        let mut func = Func::<X64Inst>::new("t".into());
+        let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
+        let id = func.new_aggregate(vec![v0, v1]);
+        assert_eq!(func.aggregate_operands(id).elems, vec![v0, v1]);
     }
 
     #[test]

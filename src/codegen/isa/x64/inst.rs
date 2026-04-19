@@ -233,6 +233,26 @@ pub enum X64Inst {
     /// Full memory fence (`mfence`). Lowers LLVM `fence` with seq_cst
     /// semantics. No operands.
     Mfence,
+
+    /// Load an incoming stack-passed argument into `dst`.
+    /// `stack_idx` is 0-based within the stack-passed arguments — the
+    /// 7th SysV integer argument has `stack_idx = 0`, the 8th has `1`,
+    /// etc. Emits `mov dst, [rbp + 16 + 8*K + 8*stack_idx]` where `K`
+    /// is the number of callee-saved registers the prologue pushed
+    /// between `push rbp` and `mov rbp, rsp`.
+    LoadArgFromStack { dst: Reg, stack_idx: u32 },
+    /// Store an outgoing argument into the reserved stack slot for a
+    /// call. `stack_idx` counts from the first stack-passed argument
+    /// (0 for the 7th SysV arg). Emits `mov [rsp + 8*stack_idx], src`.
+    /// The caller must have already reserved enough stack (via
+    /// `AdjustRsp`) and taken 16-byte alignment into account.
+    StoreStackArg { src: Reg, stack_idx: u32 },
+    /// Move the stack pointer by `delta`. Positive = grow (add rsp);
+    /// negative = shrink (sub rsp). Used around calls with
+    /// stack-passed arguments to reserve / reclaim an outgoing-args
+    /// area while preserving the 16-byte RSP alignment required at
+    /// each CALL.
+    AdjustRsp { delta: i32 },
     // Raw RET — assumes ABI return register is already set and the frame has
     // been torn down. Emitted by the prologue/epilogue pass.
     RawRet,
@@ -317,10 +337,13 @@ impl Inst for X64Inst {
             X64Inst::Cmov64rr { dst, src, .. } => smallvec![*dst, *src],
             X64Inst::Setcc8r { .. } => smallvec![],
             X64Inst::Call64r { target } | X64Inst::Jmp64r { target } => smallvec![*target],
+            X64Inst::StoreStackArg { src, .. } => smallvec![*src],
             X64Inst::Jmp { .. }
             | X64Inst::CondJmp { .. }
             | X64Inst::Ud2
-            | X64Inst::Mfence => smallvec![],
+            | X64Inst::Mfence
+            | X64Inst::LoadArgFromStack { .. }
+            | X64Inst::AdjustRsp { .. } => smallvec![],
         }
     }
 
@@ -364,7 +387,8 @@ impl Inst for X64Inst {
             | X64Inst::Shr64rcl { dst, .. }
             | X64Inst::Sar64rcl { dst, .. }
             | X64Inst::Cmov64rr { dst, .. }
-            | X64Inst::Setcc8r { dst, .. } => smallvec![*dst],
+            | X64Inst::Setcc8r { dst, .. }
+            | X64Inst::LoadArgFromStack { dst, .. } => smallvec![*dst],
             X64Inst::Idiv64r { quotient, remainder, .. }
             | X64Inst::Div64r { quotient, remainder, .. } => {
                 let mut defs: SmallVec<[Reg; 1]> = smallvec![*quotient];
@@ -385,6 +409,8 @@ impl Inst for X64Inst {
             | X64Inst::Jmp64r { .. }
             | X64Inst::Ud2
             | X64Inst::Mfence
+            | X64Inst::StoreStackArg { .. }
+            | X64Inst::AdjustRsp { .. }
             | X64Inst::RawRet => smallvec![],
         }
     }
@@ -550,6 +576,13 @@ impl Display for X64Inst {
             X64Inst::Jmp64r { target } => write!(f, "jmp {}", reg_name(*target)),
             X64Inst::Ud2 => f.write_str("ud2"),
             X64Inst::Mfence => f.write_str("mfence"),
+            X64Inst::LoadArgFromStack { dst, stack_idx } => {
+                write!(f, "{} = load_stack_arg #{stack_idx}", reg_name(*dst))
+            }
+            X64Inst::StoreStackArg { src, stack_idx } => {
+                write!(f, "store_stack_arg #{stack_idx} = {}", reg_name(*src))
+            }
+            X64Inst::AdjustRsp { delta } => write!(f, "adjust_rsp {delta}"),
             X64Inst::RawRet => f.write_str("ret"),
         }
     }
@@ -827,6 +860,49 @@ mod tests {
                 }
             ),
             "lea v1, [v2+v3*4+8]"
+        );
+    }
+
+    #[test]
+    fn load_arg_from_stack_defs_dst_uses_nothing() {
+        let inst = X64Inst::LoadArgFromStack { dst: 3, stack_idx: 0 };
+        assert_eq!(inst.get_defs().as_slice(), &[3]);
+        assert!(inst.get_uses().is_empty());
+    }
+
+    #[test]
+    fn store_stack_arg_uses_src_defs_nothing() {
+        let inst = X64Inst::StoreStackArg { src: 5, stack_idx: 1 };
+        assert_eq!(inst.get_uses().as_slice(), &[5]);
+        assert!(inst.get_defs().is_empty());
+    }
+
+    #[test]
+    fn adjust_rsp_uses_nothing_defs_nothing() {
+        for delta in [-16_i32, 16] {
+            let inst = X64Inst::AdjustRsp { delta };
+            assert!(inst.get_uses().is_empty());
+            assert!(inst.get_defs().is_empty());
+        }
+    }
+
+    #[test]
+    fn display_stack_arg_variants() {
+        assert_eq!(
+            format!("{}", X64Inst::LoadArgFromStack { dst: 2, stack_idx: 0 }),
+            "v2 = load_stack_arg #0"
+        );
+        assert_eq!(
+            format!("{}", X64Inst::StoreStackArg { src: 4, stack_idx: 1 }),
+            "store_stack_arg #1 = v4"
+        );
+        assert_eq!(
+            format!("{}", X64Inst::AdjustRsp { delta: -16 }),
+            "adjust_rsp -16"
+        );
+        assert_eq!(
+            format!("{}", X64Inst::AdjustRsp { delta: 16 }),
+            "adjust_rsp 16"
         );
     }
 }

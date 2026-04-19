@@ -98,7 +98,6 @@ Disable temporarily via `/hooks` if the loop is noisy during a refactor.
 
 Current gaps (roughly ordered by friction):
 - No `Phi` pseudo or SSA-destruction pass — multi-block functions with value merges must encode them by hand (e.g. via pre-binding). Blocks Phase 3.
-- No stack-passed arguments. `abi_lower` panics if the frontend requests arg index ≥ 6 on SysV.
 - No `CallPseudo` lowering. Single-function JIT only.
 - No `IDIV` / shift / bitwise ops yet. Covered under Phase 2.
 - Allocatable pool is restricted to caller-saved `SysV` regs. Extending to

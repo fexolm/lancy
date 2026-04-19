@@ -41,23 +41,29 @@ impl AbiLowering<X64Inst> for SysVAmd64Lowering {
             for inst in old {
                 match inst {
                     Instruction::Pseudo(PseudoInstruction::Arg { dst, idx }) => {
-                        let preg = cc.int_arg_reg(idx).unwrap_or_else(|| {
-                            panic!(
-                                "arg idx {idx} exceeds register-passed arg count ({}) \
-                                 — stack args not supported",
-                                cc.max_int_args_in_regs()
-                            )
-                        });
-                        let shim = func.new_vreg();
-                        reg_bind.insert(shim, preg);
-                        new.push(Instruction::Pseudo(PseudoInstruction::Arg {
-                            dst: shim,
-                            idx,
-                        }));
-                        new.push(Instruction::Pseudo(PseudoInstruction::Copy {
-                            dst,
-                            src: shim,
-                        }));
+                        if let Some(preg) = cc.int_arg_reg(idx) {
+                            let shim = func.new_vreg();
+                            reg_bind.insert(shim, preg);
+                            new.push(Instruction::Pseudo(PseudoInstruction::Arg {
+                                dst: shim,
+                                idx,
+                            }));
+                            new.push(Instruction::Pseudo(PseudoInstruction::Copy {
+                                dst,
+                                src: shim,
+                            }));
+                        } else {
+                            // Stack-passed argument (idx >= 6 for SysV).
+                            // The caller placed the value at a rbp-relative
+                            // offset above the saved registers; emit a
+                            // dedicated load. Indexing from 0 relative to
+                            // the first stack-passed arg.
+                            let stack_idx = idx - cc.max_int_args_in_regs();
+                            new.push(Instruction::Target(X64Inst::LoadArgFromStack {
+                                dst,
+                                stack_idx,
+                            }));
+                        }
                     }
                     Instruction::Pseudo(PseudoInstruction::Return { src }) => {
                         let ret_vreg = func.new_vreg();
@@ -100,21 +106,42 @@ fn lower_call(
     let args = call_data.args;
     let rets = call_data.rets;
     assert!(
-        args.len() <= INT_ARG_REGS.len(),
-        "stack-passed args not yet supported ({} args > {})",
-        args.len(),
-        INT_ARG_REGS.len()
-    );
-    assert!(
         rets.len() <= 1,
         "multiple-return calls not yet supported"
     );
 
+    // Split arguments into register-passed and stack-passed halves.
+    let reg_arg_count = args.len().min(INT_ARG_REGS.len());
+    let stack_arg_count = args.len().saturating_sub(INT_ARG_REGS.len());
+
+    // Reserve a 16-byte-aligned outgoing-args area. Rsp is 16-aligned
+    // on entry to this call (the function prologue established that,
+    // and no dynamic RSP motion happens between calls); a padded
+    // region keeps the CALL at a 16-aligned Rsp.
+    let raw_bytes = (stack_arg_count * 8) as i32;
+    let reserved = (raw_bytes + 15) & !15; // round up to multiple of 16
+    if reserved > 0 {
+        new.push(Instruction::Target(X64Inst::AdjustRsp { delta: -reserved }));
+    }
+
+    // Emit stack-arg stores (writes to `[rsp + 8*stack_idx]`). Order
+    // within the outgoing area: the 7th arg at the lowest address —
+    // matching the SysV layout so the callee sees it at `[rbp+16+…]`.
+    // These stores are after the AdjustRsp so `[rsp+i*8]` refers to
+    // the freshly reserved region.
+    for (i, user_arg) in args.iter().copied().enumerate().skip(INT_ARG_REGS.len()) {
+        let stack_idx = (i - INT_ARG_REGS.len()) as u32;
+        new.push(Instruction::Target(X64Inst::StoreStackArg {
+            src: user_arg,
+            stack_idx,
+        }));
+    }
+
     // Copy each user-arg vreg into a fresh shim vreg pinned to the
     // SysV arg preg. The shim's life is from Copy to Call64r, so it
     // occupies the arg preg across that window.
-    let mut arg_shims: Vec<Reg> = Vec::with_capacity(args.len());
-    for (i, user_arg) in args.iter().copied().enumerate() {
+    let mut arg_shims: Vec<Reg> = Vec::with_capacity(reg_arg_count);
+    for (i, user_arg) in args.iter().copied().take(reg_arg_count).enumerate() {
         let shim = func.new_vreg();
         reg_bind.insert(shim, INT_ARG_REGS[i]);
         new.push(Instruction::Pseudo(PseudoInstruction::Copy {
@@ -125,9 +152,9 @@ fn lower_call(
     }
 
     // Clobber markers for caller-saved pregs NOT holding the first
-    // `args.len()` arg regs. Each clobber vreg is defined and pinned
-    // to its preg at a point right before the call's target load —
-    // any user vreg still live in that preg must get evicted /
+    // `reg_arg_count` arg regs. Each clobber vreg is defined and
+    // pinned to its preg at a point right before the call's target
+    // load — any user vreg still live in that preg must get evicted /
     // split-spilled ahead of this point so the JIT-callee can stomp
     // on the preg freely.
     //
@@ -135,7 +162,7 @@ fn lower_call(
         emit_clobber(func, new, reg_bind, preg);
     }
     for (i, &arg_preg) in INT_ARG_REGS.iter().enumerate() {
-        if i >= args.len() {
+        if i >= reg_arg_count {
             emit_clobber(func, new, reg_bind, arg_preg);
         }
     }
@@ -151,6 +178,12 @@ fn lower_call(
 
     // Emit the call.
     new.push(Instruction::Target(X64Inst::Call64r { target: addr_vreg }));
+
+    // Reclaim the outgoing-args area before touching RAX / the ret
+    // shim so post-call IR sees a canonical RSP.
+    if reserved > 0 {
+        new.push(Instruction::Target(X64Inst::AdjustRsp { delta: reserved }));
+    }
 
     // Extract the return value: define ret_shim pinned to RAX, copy
     // into the user's return vreg.
@@ -279,16 +312,135 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "arg idx 6 exceeds register-passed arg count (6)")]
-    fn lowering_panics_on_more_than_six_args() {
-        let mut func = Func::<X64Inst>::new("too_many_args".to_string());
+    fn stack_passed_args_lower_to_load_from_stack() {
+        // fn(a0..a7) — a0..a5 are reg-passed, a6 and a7 are stack-passed.
+        let mut func = Func::<X64Inst>::new("many_args".to_string());
         let b0 = func.add_empty_block();
-        let bd = func.get_block_data_mut(b0);
-        for i in 0..7 {
-            let v = 0;
-            bd.push_pseudo_inst(PseudoInstruction::Arg { dst: v, idx: i });
+        let mut dsts = Vec::new();
+        for i in 0..8 {
+            let v = func.new_vreg();
+            dsts.push(v);
+            func.get_block_data_mut(b0)
+                .push_pseudo_inst(PseudoInstruction::Arg { dst: v, idx: i });
         }
-        bd.push_target_inst(X64Inst::RawRet);
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::Return { src: dsts[6] });
         SysVAmd64Lowering.lower(&mut func);
+
+        // The two stack-passed Args must have turned into LoadArgFromStack
+        // with stack_idx = 0 and 1.
+        let mut seen: Vec<(Reg, u32)> = Vec::new();
+        for inst in func.get_block_data(b0).iter() {
+            if let Instruction::Target(X64Inst::LoadArgFromStack { dst, stack_idx }) = inst {
+                seen.push((*dst, *stack_idx));
+            }
+        }
+        assert_eq!(seen.len(), 2, "two stack-passed args expected");
+        assert_eq!(seen[0], (dsts[6], 0));
+        assert_eq!(seen[1], (dsts[7], 1));
+    }
+
+    #[test]
+    fn call_with_stack_args_emits_store_and_rsp_adjusts() {
+        use crate::codegen::tir::{CallData, CallTarget};
+        let mut func = Func::<X64Inst>::new("caller".to_string());
+        let b0 = func.add_empty_block();
+        let args: Vec<Reg> = (0..8).map(|_| func.new_vreg()).collect();
+        let ret = func.new_vreg();
+        let id = func.new_call(CallData {
+            callee: CallTarget::Symbol("callee".into()),
+            args: args.clone(),
+            rets: vec![ret],
+        });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::CallPseudo { id });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::Return { src: ret });
+        SysVAmd64Lowering.lower(&mut func);
+
+        let insts: Vec<_> = func.get_block_data(b0).iter().copied().collect();
+        // Expect: AdjustRsp(-16), then two StoreStackArg, then reg-arg
+        // copies, clobbers, Mov64ri, Call64r, AdjustRsp(+16), ret
+        // shim/copy, then the original RawRet-pair (emitted by Return
+        // lowering).
+        let adj_neg = insts.iter().find_map(|i| match i {
+            Instruction::Target(X64Inst::AdjustRsp { delta }) if *delta < 0 => Some(*delta),
+            _ => None,
+        });
+        assert_eq!(adj_neg, Some(-16), "reserve 16 bytes for 2 stack args");
+
+        let stack_stores: Vec<_> = insts
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::Target(X64Inst::StoreStackArg { src, stack_idx }) => {
+                    Some((*src, *stack_idx))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stack_stores, vec![(args[6], 0), (args[7], 1)]);
+
+        let adj_pos = insts.iter().find_map(|i| match i {
+            Instruction::Target(X64Inst::AdjustRsp { delta }) if *delta > 0 => Some(*delta),
+            _ => None,
+        });
+        assert_eq!(adj_pos, Some(16), "reclaim 16 bytes after call");
+    }
+
+    #[test]
+    fn call_with_exactly_six_args_emits_no_rsp_motion() {
+        use crate::codegen::tir::{CallData, CallTarget};
+        let mut func = Func::<X64Inst>::new("caller6".to_string());
+        let b0 = func.add_empty_block();
+        let args: Vec<Reg> = (0..6).map(|_| func.new_vreg()).collect();
+        let ret = func.new_vreg();
+        let id = func.new_call(CallData {
+            callee: CallTarget::Symbol("callee".into()),
+            args,
+            rets: vec![ret],
+        });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::CallPseudo { id });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::Return { src: ret });
+        SysVAmd64Lowering.lower(&mut func);
+
+        for inst in func.get_block_data(b0).iter() {
+            assert!(
+                !matches!(inst, Instruction::Target(X64Inst::AdjustRsp { .. })),
+                "no rsp motion expected: {inst:?}"
+            );
+            assert!(
+                !matches!(inst, Instruction::Target(X64Inst::StoreStackArg { .. })),
+                "no stack args expected: {inst:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_with_odd_stack_arg_count_reserves_aligned_pad() {
+        use crate::codegen::tir::{CallData, CallTarget};
+        let mut func = Func::<X64Inst>::new("caller7".to_string());
+        let b0 = func.add_empty_block();
+        // 7 args = 1 stack-passed → reserve 16 (8 + 8 pad) to keep
+        // rsp 16-aligned at the CALL instruction.
+        let args: Vec<Reg> = (0..7).map(|_| func.new_vreg()).collect();
+        let ret = func.new_vreg();
+        let id = func.new_call(CallData {
+            callee: CallTarget::Symbol("callee".into()),
+            args,
+            rets: vec![ret],
+        });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::CallPseudo { id });
+        func.get_block_data_mut(b0)
+            .push_pseudo_inst(PseudoInstruction::Return { src: ret });
+        SysVAmd64Lowering.lower(&mut func);
+
+        let adj_neg = func.get_block_data(b0).iter().find_map(|i| match i {
+            Instruction::Target(X64Inst::AdjustRsp { delta }) if *delta < 0 => Some(*delta),
+            _ => None,
+        });
+        assert_eq!(adj_neg, Some(-16));
     }
 }

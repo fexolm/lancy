@@ -121,7 +121,14 @@ fn scratch_demand_of(inst: &X64Inst) -> usize {
         | X64Inst::CondJmp { .. }
         | X64Inst::RawRet
         | X64Inst::Ud2
-        | X64Inst::Mfence => 0,
+        | X64Inst::Mfence
+        | X64Inst::AdjustRsp { .. } => 0,
+        // `LoadArgFromStack` writes to `dst`; if spilled we need one
+        // scratch to land the value before storing to the slot.
+        X64Inst::LoadArgFromStack { .. } => 1,
+        // `StoreStackArg` reads from `src`; if spilled we need one
+        // scratch to load the value before storing to `[rsp+disp]`.
+        X64Inst::StoreStackArg { .. } => 1,
     }
 }
 
@@ -950,6 +957,35 @@ impl<'i> FnMCWriter<'i> {
             }
             X64Inst::Mfence => {
                 self.asm.mfence().expect("mfence");
+            }
+            X64Inst::LoadArgFromStack { dst, stack_idx } => {
+                // Address of argument on the caller's stack:
+                // [rbp + 8 (saved rbp) + 8 (retaddr) + 8*K (callee-saved pushes)
+                //      + 8*stack_idx], because the current prologue pushes
+                // callee-saved registers between `push rbp` and
+                // `mov rbp, rsp`, which offsets the standard 16-byte rbp-to-arg7
+                // distance by `8*K`.
+                let k = self.saved_callee_regs.len() as i32;
+                let disp = 16 + 8 * k + 8 * (stack_idx as i32);
+                let dst_p = self.prepare_def_preg(dst, def_pt, 0);
+                self.asm
+                    .mov(to_ice_reg(dst_p), rbp + i64::from(disp))
+                    .expect("mov r64, [rbp+arg_disp]");
+                self.store_def(dst, def_pt, 0);
+            }
+            X64Inst::StoreStackArg { src, stack_idx } => {
+                let src_r = self.load_use(src, use_pt, 0);
+                let disp = 8 * i64::from(stack_idx);
+                self.asm
+                    .mov(rsp + disp, src_r)
+                    .expect("mov [rsp+disp], r64");
+            }
+            X64Inst::AdjustRsp { delta } => {
+                if delta > 0 {
+                    self.asm.add(rsp, delta).expect("add rsp, imm");
+                } else if delta < 0 {
+                    self.asm.sub(rsp, -delta).expect("sub rsp, imm");
+                }
             }
             X64Inst::RawRet => self.emit_epilogue(),
         }

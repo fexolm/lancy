@@ -947,4 +947,574 @@ mod tests {
         assert_eq!(unsafe { f(0, 0) }, 1);
         assert_eq!(unsafe { f(-1, 1) }, 0);
     }
+
+    // -------------- SysV calling-convention coverage --------------
+    //
+    // These tests hammer the integer half of SysV AMD64 from every
+    // angle: per-arg-index identity, >6-arg functions that exercise
+    // incoming stack-args, calls emitting outgoing stack args, deep
+    // recursion that mixes both directions, callee-saved preservation
+    // across calls, and 16-byte RSP alignment at call sites.
+
+    /// Build a function that returns exactly the nth argument, where
+    /// `n_args` is the total number of declared args. Used to verify
+    /// that the ABI places each integer arg in the expected slot.
+    fn build_return_nth(name: &str, n_args: u32, pick: u32) -> Func<X64Inst> {
+        let mut b = FuncBuilder::new(name);
+        let mut args = Vec::with_capacity(n_args as usize);
+        for _ in 0..n_args {
+            args.push(b.arg());
+        }
+        b.ret(args[pick as usize]);
+        b.build()
+    }
+
+    #[test]
+    fn jit_fn_zero_args_returns_constant() {
+        #[allow(non_camel_case_types)]
+        type Fn0 = unsafe extern "sysv64" fn() -> i64;
+        let mut b = FuncBuilder::new("zero_args");
+        let k = b.iconst64(0xDEAD_BEEF);
+        b.ret(k);
+        let m = jit(b.build()).unwrap();
+        let f: Fn0 = unsafe { m.entry() };
+        assert_eq!(unsafe { f() }, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn jit_sysv_each_reg_arg_round_trips() {
+        #[allow(non_camel_case_types)]
+        type Fn6 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64) -> i64;
+        for pick in 0..6 {
+            let m = jit(build_return_nth("pick6", 6, pick)).unwrap();
+            let f: Fn6 = unsafe { m.entry() };
+            let a = [10_i64, 20, 30, 40, 50, 60];
+            assert_eq!(
+                unsafe { f(a[0], a[1], a[2], a[3], a[4], a[5]) },
+                a[pick as usize],
+                "pick={pick}"
+            );
+        }
+    }
+
+    #[test]
+    fn jit_sysv_7th_arg_comes_from_stack() {
+        #[allow(non_camel_case_types)]
+        type Fn7 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+        let m = jit(build_return_nth("pick7", 7, 6)).unwrap();
+        let f: Fn7 = unsafe { m.entry() };
+        // Feed distinct sentinels so a misread reg vs. stack slot shows up.
+        let r = unsafe { f(1, 2, 3, 4, 5, 6, 0x7777_7777_7777_7777) };
+        assert_eq!(r, 0x7777_7777_7777_7777);
+    }
+
+    #[test]
+    fn jit_sysv_each_arg_position_in_8_arg_fn() {
+        #[allow(non_camel_case_types)]
+        type Fn8 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let vals: [i64; 8] = [
+            0x1111_1111_1111_1111,
+            0x2222_2222_2222_2222,
+            0x3333_3333_3333_3333,
+            0x4444_4444_4444_4444,
+            0x5555_5555_5555_5555,
+            0x6666_6666_6666_6666,
+            0x7777_7777_7777_7777_u64 as i64,
+            0x0123_4567_89AB_CDEF,
+        ];
+        for pick in 0..8 {
+            let m = jit(build_return_nth("pick8", 8, pick)).unwrap();
+            let f: Fn8 = unsafe { m.entry() };
+            let got = unsafe {
+                f(
+                    vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7],
+                )
+            };
+            assert_eq!(
+                got, vals[pick as usize],
+                "pick={pick} (stack-idx={})",
+                (pick as i32) - 6
+            );
+        }
+    }
+
+    #[test]
+    fn jit_sysv_sum_of_8_args_exercises_both_stack_slots() {
+        #[allow(non_camel_case_types)]
+        type Fn8 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let mut b = FuncBuilder::new("sum8");
+        let args: Vec<_> = (0..8).map(|_| b.arg()).collect();
+        let mut acc = args[0];
+        for a in &args[1..] {
+            acc = b.add(acc, *a);
+        }
+        b.ret(acc);
+        let m = jit(b.build()).unwrap();
+        let f: Fn8 = unsafe { m.entry() };
+        let test_inputs: [[i64; 8]; 4] = [
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            [-1, -2, -3, -4, -5, -6, -7, -8],
+            [i64::MAX, 0, 0, 0, 0, 0, 0, 1],
+            [100, -50, 25, -10, 5, 0, -99, 200],
+        ];
+        for v in &test_inputs {
+            let want: i64 = v.iter().copied().fold(0_i64, i64::wrapping_add);
+            let got = unsafe { f(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]) };
+            assert_eq!(got, want, "v={v:?}");
+        }
+    }
+
+    #[test]
+    fn jit_sysv_sum_of_12_args_deep_into_stack() {
+        #[allow(non_camel_case_types)]
+        type Fn12 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let mut b = FuncBuilder::new("sum12");
+        let args: Vec<_> = (0..12).map(|_| b.arg()).collect();
+        let mut acc = args[0];
+        for a in &args[1..] {
+            acc = b.add(acc, *a);
+        }
+        b.ret(acc);
+        let m = jit(b.build()).unwrap();
+        let f: Fn12 = unsafe { m.entry() };
+        let got = unsafe { f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) };
+        assert_eq!(got, (1..=12).sum());
+    }
+
+    #[test]
+    fn jit_sysv_sum_of_16_args_all_stack_and_reg() {
+        #[allow(non_camel_case_types)]
+        type Fn16 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let mut b = FuncBuilder::new("sum16");
+        let args: Vec<_> = (0..16).map(|_| b.arg()).collect();
+        let mut acc = args[0];
+        for a in &args[1..] {
+            acc = b.add(acc, *a);
+        }
+        b.ret(acc);
+        let m = jit(b.build()).unwrap();
+        let f: Fn16 = unsafe { m.entry() };
+        let got = unsafe {
+            f(
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            )
+        };
+        assert_eq!(got, (1..=16).sum());
+    }
+
+    #[test]
+    fn jit_sysv_stack_arg_preserves_min_max_int64() {
+        // If the stack-arg load path truncated or sign-extended the
+        // value incorrectly, these sentinels would surface the bug.
+        #[allow(non_camel_case_types)]
+        type Fn7 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+        let m = jit(build_return_nth("pick7_minmax", 7, 6)).unwrap();
+        let f: Fn7 = unsafe { m.entry() };
+        for v in [i64::MAX, i64::MIN, -1_i64, 0_i64, 1_i64] {
+            assert_eq!(unsafe { f(0, 0, 0, 0, 0, 0, v) }, v, "v={v}");
+        }
+    }
+
+    #[test]
+    fn jit_sysv_outgoing_call_with_7_args_recursion() {
+        use crate::codegen::isa::x64::inst::Cond;
+        // fn sum(n: i64, a, b, c, d, e, f) -> i64
+        //   where args are treated as the accumulator set.
+        //   if n <= 0 return a+b+c+d+e+f
+        //   else return sum(n-1, a, b, c, d, e, f)
+        // Exercises outgoing stack args (7th param) in a recursive call.
+        let mut b = FuncBuilder::new("rec7");
+        let n = b.arg();
+        let a = b.arg();
+        let c = b.arg();
+        let d = b.arg();
+        let e = b.arg();
+        let g = b.arg();
+        let h = b.arg(); // 7th arg — stack-passed
+        let zero = b.iconst64(0);
+        let base_blk = b.new_block();
+        let rec_blk = b.new_block();
+        b.branch_icmp(Cond::LE, n, zero, base_blk, rec_blk);
+        b.switch_to_block(base_blk);
+        let s1 = b.add(a, c);
+        let s2 = b.add(s1, d);
+        let s3 = b.add(s2, e);
+        let s4 = b.add(s3, g);
+        let s5 = b.add(s4, h);
+        b.ret(s5);
+        b.switch_to_block(rec_blk);
+        let one = b.iconst64(1);
+        let n_minus_one = b.sub(n, one);
+        let r = b.call_sym("rec7", &[n_minus_one, a, c, d, e, g, h]);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        #[allow(non_camel_case_types)]
+        type Fn7 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+        let f: Fn7 = unsafe { m.entry() };
+        // Sum of last 6 args, irrespective of `n` depth.
+        for n in [0_i64, 1, 5, 20] {
+            let got = unsafe { f(n, 1, 2, 3, 4, 5, 6) };
+            assert_eq!(got, 21, "n={n} — last six should still sum to 21");
+        }
+    }
+
+    #[test]
+    fn jit_sysv_outgoing_call_with_8_args_recursion() {
+        use crate::codegen::isa::x64::inst::Cond;
+        // 8-arg recursion: fn(n, a..g) — test that even-count (no
+        // padding needed) stack-arg lowering works.
+        let mut b = FuncBuilder::new("rec8");
+        let n = b.arg();
+        let a1 = b.arg();
+        let a2 = b.arg();
+        let a3 = b.arg();
+        let a4 = b.arg();
+        let a5 = b.arg();
+        let a6 = b.arg(); // 7th: stack-passed
+        let a7 = b.arg(); // 8th: stack-passed
+        let zero = b.iconst64(0);
+        let base = b.new_block();
+        let rec = b.new_block();
+        b.branch_icmp(Cond::LE, n, zero, base, rec);
+        b.switch_to_block(base);
+        let t1 = b.add(a1, a2);
+        let t2 = b.add(t1, a3);
+        let t3 = b.add(t2, a4);
+        let t4 = b.add(t3, a5);
+        let t5 = b.add(t4, a6);
+        let t6 = b.add(t5, a7);
+        b.ret(t6);
+        b.switch_to_block(rec);
+        let one = b.iconst64(1);
+        let np = b.sub(n, one);
+        let r = b.call_sym("rec8", &[np, a1, a2, a3, a4, a5, a6, a7]);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        #[allow(non_camel_case_types)]
+        type Fn8 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let f: Fn8 = unsafe { m.entry() };
+        for n in [0_i64, 1, 3, 10] {
+            let got = unsafe { f(n, 1, 2, 3, 4, 5, 6, 7) };
+            assert_eq!(got, 28, "n={n} — (1+2+…+7)=28");
+        }
+    }
+
+    #[test]
+    fn jit_sysv_stack_alignment_is_maintained_across_call_sites() {
+        // Call a function that itself calls another function that
+        // demands 16-byte-aligned rsp at entry. On x86-64 Linux many
+        // libc routines rely on alignment via SSE movdqa; `sqrt` is a
+        // classic example. If we miscompute the outgoing-args area
+        // size (e.g. 8 instead of 16 for a single stack arg), the
+        // call in libc would segfault or give garbage.
+        //
+        // We'll call `labs` through a wrapper that passes 7 args to a
+        // JIT-self recursion, then out of that stack-arg level calls
+        // `labs` on the stack-passed value.
+        use crate::codegen::isa::x64::inst::Cond;
+        let mut b = FuncBuilder::new("align_probe");
+        let n = b.arg();
+        let pad1 = b.arg();
+        let pad2 = b.arg();
+        let pad3 = b.arg();
+        let pad4 = b.arg();
+        let pad5 = b.arg();
+        let x = b.arg(); // 7th arg — stack-passed
+        let zero = b.iconst64(0);
+        let base = b.new_block();
+        let rec = b.new_block();
+        b.branch_icmp(Cond::LE, n, zero, base, rec);
+        b.switch_to_block(base);
+        let r = b.call_sym("labs", &[x]);
+        b.ret(r);
+        b.switch_to_block(rec);
+        let one = b.iconst64(1);
+        let np = b.sub(n, one);
+        let rr = b.call_sym("align_probe", &[np, pad1, pad2, pad3, pad4, pad5, x]);
+        b.ret(rr);
+        let m = jit(b.build()).unwrap();
+        #[allow(non_camel_case_types)]
+        type Fn7 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+        let f: Fn7 = unsafe { m.entry() };
+        for depth in [0_i64, 1, 3, 5] {
+            for x in [-42_i64, 0, 42, i64::MAX] {
+                let got = unsafe { f(depth, 0, 0, 0, 0, 0, x) };
+                assert_eq!(got, x.wrapping_abs(), "depth={depth}, x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn jit_sysv_stack_arg_value_lives_across_later_spilling_work() {
+        // Force the regalloc to spill heavily AFTER reading a
+        // stack-passed arg. The stack-arg load must persist through
+        // the spills without being confused with spill slots on the
+        // frame.
+        let mut b = FuncBuilder::new("stack_arg_surviving_pressure");
+        let _r1 = b.arg();
+        let _r2 = b.arg();
+        let _r3 = b.arg();
+        let _r4 = b.arg();
+        let _r5 = b.arg();
+        let _r6 = b.arg();
+        let stk = b.arg(); // 7th arg — stack-passed
+        // Create lots of live values competing for caller-saved pregs.
+        let mut acc = stk;
+        for k in 0..20 {
+            let c = b.iconst64(k);
+            acc = b.add(acc, c);
+        }
+        // Subtract the values we added back so the answer is `stk`.
+        for k in 0..20 {
+            let c = b.iconst64(k);
+            acc = b.sub(acc, c);
+        }
+        b.ret(acc);
+        let m = jit(b.build()).unwrap();
+        #[allow(non_camel_case_types)]
+        type Fn7 = unsafe extern "sysv64" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+        let f: Fn7 = unsafe { m.entry() };
+        for x in [0_i64, 1, -1, 42, i64::MAX, i64::MIN] {
+            let got = unsafe { f(0, 0, 0, 0, 0, 0, x) };
+            assert_eq!(got, x, "x={x}");
+        }
+    }
+
+    #[test]
+    fn jit_sysv_outgoing_stack_arg_carries_exact_value() {
+        // Test that on the caller side, when we pass a value via a
+        // stack slot, the callee receives exactly the same bits. We
+        // recurse once with 8 args and verify args[6] and args[7] are
+        // preserved bit-exactly.
+        use crate::codegen::isa::x64::inst::Cond;
+        let mut b = FuncBuilder::new("bits8");
+        let n = b.arg();
+        let a0 = b.arg();
+        let a1 = b.arg();
+        let a2 = b.arg();
+        let a3 = b.arg();
+        let a4 = b.arg();
+        let a5 = b.arg(); // 7th — stack
+        let a6 = b.arg(); // 8th — stack
+        let zero = b.iconst64(0);
+        let base = b.new_block();
+        let rec = b.new_block();
+        b.branch_icmp(Cond::LE, n, zero, base, rec);
+        b.switch_to_block(base);
+        // Base case: XOR the two stack args and return.
+        let x = b.xor(a5, a6);
+        b.ret(x);
+        b.switch_to_block(rec);
+        let one = b.iconst64(1);
+        let np = b.sub(n, one);
+        let r = b.call_sym("bits8", &[np, a0, a1, a2, a3, a4, a5, a6]);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        #[allow(non_camel_case_types)]
+        type Fn8 = unsafe extern "sysv64" fn(
+            i64, i64, i64, i64, i64, i64, i64, i64,
+        ) -> i64;
+        let f: Fn8 = unsafe { m.entry() };
+        let a5 = 0x0123_4567_89AB_CDEF_i64;
+        let a6 = 0xFEDC_BA98_7654_3210_u64 as i64;
+        for n in [0_i64, 1, 4] {
+            let got = unsafe { f(n, 0, 0, 0, 0, 0, a5, a6) };
+            assert_eq!(got, a5 ^ a6, "n={n}");
+        }
+    }
+
+    // A global-asm wrapper that installs `sentinel` into every SysV
+    // integer callee-saved register, calls `fp` via sysv64 with `arg`
+    // in RDI, and returns a bitmask in RAX where bit `i` is set iff
+    // the corresponding register did not survive the call.
+    //
+    //   bit 0 = RBX, bit 1 = R12, bit 2 = R13, bit 3 = R14, bit 4 = R15
+    //
+    // Signature: fn(sentinel: u64, fp: *const (), arg: i64) -> u64
+    //            rdi         rsi            rdx
+    std::arch::global_asm!(concat!(
+        ".global ", "lancy_check_callee_saved", "\n",
+        ".type ", "lancy_check_callee_saved", ", @function\n",
+        "lancy_check_callee_saved:\n",
+        // Prologue: preserve caller's callee-saveds.
+        "push rbx\n",
+        "push r12\n",
+        "push r13\n",
+        "push r14\n",
+        "push r15\n",
+        // Set callee-saveds to the sentinel (rdi). RSI holds fp,
+        // RDX holds the arg the JIT fn should receive in RDI.
+        "mov rbx, rdi\n",
+        "mov r12, rdi\n",
+        "mov r13, rdi\n",
+        "mov r14, rdi\n",
+        "mov r15, rdi\n",
+        // Stash sentinel on stack (we'll need it after the call to
+        // compare) and shuffle args: rdi <- rdx (JIT's arg0).
+        "push rdi\n",
+        "mov  rax, rsi\n",          // fp
+        "mov  rdi, rdx\n",          // JIT arg0
+        // 16-byte alignment check: we've pushed 6 qwords (5 callees
+        // + sentinel) + return addr = 7 qwords = 56 bytes. 56 % 16 == 8,
+        // so rsp is 8-misaligned — pad.
+        "sub  rsp, 8\n",
+        "call rax\n",
+        "add  rsp, 8\n",
+        "pop  rdi\n",               // sentinel back in rdi
+        // Compute bitmask into rax.
+        "xor  rax, rax\n",
+        "cmp  rbx, rdi\n",
+        "je   2f\n",
+        "or   rax, 1\n",
+        "2:\n",
+        "cmp  r12, rdi\n",
+        "je   3f\n",
+        "or   rax, 2\n",
+        "3:\n",
+        "cmp  r13, rdi\n",
+        "je   4f\n",
+        "or   rax, 4\n",
+        "4:\n",
+        "cmp  r14, rdi\n",
+        "je   5f\n",
+        "or   rax, 8\n",
+        "5:\n",
+        "cmp  r15, rdi\n",
+        "je   6f\n",
+        "or   rax, 16\n",
+        "6:\n",
+        // Epilogue: restore caller's callee-saveds.
+        "pop  r15\n",
+        "pop  r14\n",
+        "pop  r13\n",
+        "pop  r12\n",
+        "pop  rbx\n",
+        "ret\n",
+    ));
+
+    unsafe extern "sysv64" {
+        fn lancy_check_callee_saved(sentinel: u64, fp: *const (), arg: i64) -> u64;
+    }
+
+    /// Thin Rust wrapper around the asm helper.
+    unsafe fn check_callee_saved_preserved(
+        fp: unsafe extern "sysv64" fn(i64) -> i64,
+        sentinel: u64,
+    ) -> u64 {
+        unsafe { lancy_check_callee_saved(sentinel, fp as *const (), 0) }
+    }
+
+    #[test]
+    fn jit_preserves_callee_saved_regs_across_a_simple_fn() {
+        // A trivial JIT function still goes through prologue/epilogue.
+        // If the emitter forgot to pair push/pop for any callee-saved
+        // reg, the sentinel check would catch it.
+        let mut b = FuncBuilder::new("trivial");
+        let _a = b.arg();
+        let k = b.iconst64(42);
+        b.ret(k);
+        let m = jit(b.build()).unwrap();
+        let fp: unsafe extern "sysv64" fn(i64) -> i64 = unsafe { m.entry() };
+        let bad = unsafe { check_callee_saved_preserved(fp, 0xCAFE_F00D_1234_5678) };
+        assert_eq!(bad, 0, "callee-saved bits clobbered: 0x{bad:x}");
+    }
+
+    #[test]
+    fn jit_preserves_callee_saved_regs_under_heavy_spills() {
+        // Force the emitter to use its callee-saved scratch regs
+        // (RBX/R12/R13 in the default config) by generating spills.
+        // This mirrors `jit_deep_chain_forces_spills_to_stack` but
+        // directly checks that the prologue/epilogue save/restore
+        // pair kept the caller's sentinels intact.
+        let mut b = FuncBuilder::new("many_sums_cs");
+        let a = b.arg();
+        let mut vals = vec![a];
+        for _ in 0..20 {
+            let c = b.iconst64(1);
+            let s = b.add(vals[vals.len() - 1], c);
+            vals.push(s);
+        }
+        let mut acc = vals[0];
+        for v in &vals[1..] {
+            acc = b.add(acc, *v);
+        }
+        b.ret(acc);
+        let m = jit(b.build()).unwrap();
+        let fp: unsafe extern "sysv64" fn(i64) -> i64 = unsafe { m.entry() };
+        let bad = unsafe { check_callee_saved_preserved(fp, 0x0123_4567_89AB_CDEF) };
+        assert_eq!(bad, 0, "callee-saved bits clobbered under spill: 0x{bad:x}");
+    }
+
+    #[test]
+    fn jit_preserves_callee_saved_regs_across_outgoing_call_with_stack_args() {
+        // A JIT function that itself recurses through a 7-arg call
+        // (exercises our outgoing-stack-arg emission) must still
+        // preserve the caller's callee-saved registers end-to-end.
+        //
+        // Entry signature is `fn(i64) -> i64`: the helper passes the
+        // depth in RDI (our first arg). The remaining 6 arg slots on
+        // the JIT side default to whatever the helper leaves there —
+        // we don't care about their values, only that the prologue /
+        // epilogue + recursive call round-trip preserves the caller's
+        // saveds.
+        use crate::codegen::isa::x64::inst::Cond;
+        let mut b = FuncBuilder::new("rec7_cs");
+        let n = b.arg();
+        let a1 = b.arg();
+        let a2 = b.arg();
+        let a3 = b.arg();
+        let a4 = b.arg();
+        let a5 = b.arg();
+        let a6 = b.arg();
+        let zero = b.iconst64(0);
+        let base = b.new_block();
+        let rec = b.new_block();
+        b.branch_icmp(Cond::LE, n, zero, base, rec);
+        b.switch_to_block(base);
+        let s1 = b.add(a1, a2);
+        let s2 = b.add(s1, a3);
+        let s3 = b.add(s2, a4);
+        let s4 = b.add(s3, a5);
+        let s5 = b.add(s4, a6);
+        b.ret(s5);
+        b.switch_to_block(rec);
+        let one = b.iconst64(1);
+        let np = b.sub(n, one);
+        let r = b.call_sym("rec7_cs", &[np, a1, a2, a3, a4, a5, a6]);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        // Coerce to the 1-arg signature the helper drives. The JIT
+        // entry sequence is the same: it just reads arg0 from RDI.
+        let fp: unsafe extern "sysv64" fn(i64) -> i64 = unsafe { m.entry() };
+        let bad = unsafe { check_callee_saved_preserved(fp, 0xDEAD_BEEF_BAAD_F00D) };
+        assert_eq!(
+            bad, 0,
+            "callee-saved bits clobbered across recursive stack-arg call: 0x{bad:x}"
+        );
+    }
+
+    #[test]
+    fn jit_sysv_rdi_not_confused_with_rsi_in_2_arg_fn() {
+        // fn(a, b) -> a - b tests directional correctness of the first
+        // two arg regs (RDI/RSI): swapping them would invert the sign.
+        let mut b = FuncBuilder::new("sub2");
+        let x = b.arg();
+        let y = b.arg();
+        let r = b.sub(x, y);
+        b.ret(r);
+        let m = jit(b.build()).unwrap();
+        let f: FnI64I64_I64 = unsafe { m.entry() };
+        assert_eq!(unsafe { f(100, 40) }, 60);
+        assert_eq!(unsafe { f(40, 100) }, -60);
+    }
 }

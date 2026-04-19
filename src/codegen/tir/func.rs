@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use crate::support::slotmap::{Key, PrimaryMap};
@@ -12,6 +13,13 @@ pub struct Func<I: Inst> {
     phis: PrimaryMap<PhiId, PhiData>,
     calls: PrimaryMap<CallId, CallData>,
     regs_count: u32,
+    /// Frontend-declared pre-bindings: `vreg -> preg` pins that the
+    /// allocator must honor for the vreg's whole life. Typically used
+    /// for ABI-visible shims (arg/ret registers, IDIV's RAX/RDX, shift
+    /// counts in RCX, etc.) that the frontend emits before ABI
+    /// lowering. The pipeline merges these with `AbiLowerResult::reg_bind`
+    /// before handing the config to the regalloc.
+    pre_binds: HashMap<Reg, Reg>,
 }
 
 impl<I: Inst> Func<I> {
@@ -23,6 +31,7 @@ impl<I: Inst> Func<I> {
             blocks: PrimaryMap::new(),
             phis: PrimaryMap::new(),
             calls: PrimaryMap::new(),
+            pre_binds: HashMap::new(),
         }
     }
 
@@ -52,6 +61,11 @@ impl<I: Inst> Func<I> {
     #[must_use]
     pub fn get_regs_count(&self) -> usize {
         self.regs_count as usize
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     #[must_use]
@@ -100,6 +114,25 @@ impl<I: Inst> Func<I> {
 
     pub fn call_operands_mut(&mut self, id: CallId) -> &mut CallData {
         &mut self.calls[id]
+    }
+
+    /// Declare a frontend-level pre-bind: `vreg` must occupy physical
+    /// register `preg` for its entire live range. Disagreement with any
+    /// later source (ABI lowering, `RegDef` pseudo) triggers the
+    /// allocator's pre-bind conflict check.
+    pub fn pre_bind(&mut self, vreg: Reg, preg: Reg) {
+        if let Some(prev) = self.pre_binds.insert(vreg, preg)
+            && prev != preg
+        {
+            panic!(
+                "vreg {vreg} pre-bound to two different pregs: {prev} vs {preg}"
+            );
+        }
+    }
+
+    #[must_use]
+    pub fn pre_binds(&self) -> &HashMap<Reg, Reg> {
+        &self.pre_binds
     }
 }
 

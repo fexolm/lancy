@@ -29,3 +29,7 @@ mod error;
 
 pub use converter::{compile_ir_to_jit, convert_function};
 pub use error::ConvertError;
+
+// Re-export lancy's x64 condition codes so the converter can reference
+// them via `crate::Cond` without threading through x64-specific paths.
+pub(crate) use lancy::codegen::isa::x64::inst::Cond;

@@ -17,6 +17,16 @@ pub trait Inst: Sized + Copy + Display {
     fn get_defs(&self) -> SmallVec<[Reg; 1]>;
 
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]>;
+
+    /// If this instruction is a branch whose target list contains
+    /// `old`, replace those occurrences with `new`. No-op for
+    /// non-branch instructions.
+    fn rewrite_branch_target(&mut self, old: Block, new: Block);
+
+    /// Target-specific factory for an unconditional jump. Used by
+    /// generic passes (critical-edge splitting in SSA destruction) that
+    /// need to synthesize a terminator without knowing the target ISA.
+    fn new_jmp(target: Block) -> Self;
 }
 
 slotmap_key!(PhiId(u32));
@@ -174,6 +184,16 @@ impl Inst for PseudoInstruction {
     fn get_branch_targets(&self) -> SmallVec<[Block; 2]> {
         smallvec![]
     }
+
+    fn rewrite_branch_target(&mut self, _old: Block, _new: Block) {
+        // Pseudos never branch.
+    }
+
+    fn new_jmp(_target: Block) -> Self {
+        // Pseudos don't carry branch instructions; callers that want a
+        // target-neutral jmp must synthesize one at the target level.
+        panic!("PseudoInstruction::new_jmp has no meaningful implementation — use a target Inst");
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -206,6 +226,13 @@ impl<I: Inst> Inst for Instruction<I> {
         }
     }
 
+    fn is_term(&self) -> bool {
+        match self {
+            Instruction::Target(inst) => inst.is_term(),
+            Instruction::Pseudo(inst) => inst.is_term(),
+        }
+    }
+
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
         match self {
             Instruction::Target(inst) => inst.get_uses(),
@@ -225,6 +252,17 @@ impl<I: Inst> Inst for Instruction<I> {
             Instruction::Target(inst) => inst.get_branch_targets(),
             Instruction::Pseudo(inst) => inst.get_branch_targets(),
         }
+    }
+
+    fn rewrite_branch_target(&mut self, old: Block, new: Block) {
+        match self {
+            Instruction::Target(inst) => inst.rewrite_branch_target(old, new),
+            Instruction::Pseudo(inst) => inst.rewrite_branch_target(old, new),
+        }
+    }
+
+    fn new_jmp(target: Block) -> Self {
+        Instruction::Target(I::new_jmp(target))
     }
 }
 

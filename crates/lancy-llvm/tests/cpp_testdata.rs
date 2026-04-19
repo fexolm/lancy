@@ -2,21 +2,16 @@
 //!
 //! Each `#[test]` embeds a single `.cpp` via `include_str!`, pipes it
 //! through `clang++ -O1 -S -emit-llvm`, feeds the textual LLVM IR to
-//! `lancy_llvm::compile_ir_to_jit`, and — if the conversion succeeds —
-//! calls the resulting SysV64 function pointer against a small oracle.
-//!
-//! The lancy frontend supports only a subset of LLVM IR (straight-line
-//! integer arithmetic on i64, fused icmp+br branching, no phi / select /
-//! intrinsics / calls / allocas). Anything outside that subset surfaces
-//! as `ConvertError::Unsupported` or `ConvertError::Malformed`. Those
-//! tests print a `[SKIP]` line and pass without failing — the intent is
-//! to keep the harness green today while leaving the case wired up for
-//! when the frontend grows.
+//! `lancy_llvm::compile_ir_to_jit`, and calls the resulting SysV64
+//! function pointer against a small oracle. Tests either pass
+//! outright or fail; `#[ignore]` is used for programs the frontend
+//! genuinely can't yet handle (typically pulling in large chunks of
+//! libstdc++, or LLVM optimizer tricks like i65 intermediates).
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use lancy_llvm::{ConvertError, compile_ir_to_jit};
+use lancy_llvm::compile_ir_to_jit;
 
 #[allow(non_camel_case_types)]
 type Fn1 = unsafe extern "sysv64" fn(i64) -> i64;
@@ -65,27 +60,12 @@ fn clang_to_ir(src: &str) -> Vec<u8> {
     out.stdout
 }
 
-/// Run the end-to-end pipeline. Returns `Some(module)` on success, or
-/// `None` if the test hit a known frontend limitation (prints `[SKIP]`
-/// to stderr so `cargo test -- --nocapture` surfaces the reason).
-fn try_jit(src: &str, symbol: &str) -> Option<lancy::codegen::jit::Module> {
+/// Run the end-to-end pipeline; panics on any convert or JIT error.
+/// Each integration test either JITs successfully or fails outright —
+/// there's no silent skipping.
+fn jit_or_panic(src: &str, symbol: &str) -> lancy::codegen::jit::Module {
     let ir = clang_to_ir(src);
-    match compile_ir_to_jit(&ir, symbol) {
-        Ok(m) => Some(m),
-        Err(ConvertError::Unsupported(msg)) => {
-            eprintln!("[SKIP] {symbol}: unsupported — {msg}");
-            None
-        }
-        Err(ConvertError::Malformed(msg)) => {
-            eprintln!("[SKIP] {symbol}: malformed — {msg}");
-            None
-        }
-        Err(ConvertError::FunctionNotFound(_)) => {
-            eprintln!("[SKIP] {symbol}: inlined/eliminated by clang");
-            None
-        }
-        Err(e) => panic!("{symbol}: {e}"),
-    }
+    compile_ir_to_jit(&ir, symbol).unwrap_or_else(|e| panic!("{symbol}: {e}"))
 }
 
 // -------------------------------------------------------------------
@@ -94,9 +74,7 @@ fn try_jit(src: &str, symbol: &str) -> Option<lancy::codegen::jit::Module> {
 
 #[test]
 fn cpp_add() {
-    let Some(m) = try_jit(include_str!("testdata/add.cpp"), "add") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/add.cpp"), "add");
     let f: Fn2 = unsafe { m.entry() };
     for (a, b) in [(0, 0), (1, 2), (-5, 5), (i64::MAX, 0), (100, -50)] {
         assert_eq!(unsafe { f(a, b) }, a.wrapping_add(b), "({a},{b})");
@@ -105,9 +83,7 @@ fn cpp_add() {
 
 #[test]
 fn cpp_sub() {
-    let Some(m) = try_jit(include_str!("testdata/sub.cpp"), "sub") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/sub.cpp"), "sub");
     let f: Fn2 = unsafe { m.entry() };
     for (a, b) in [(10, 3), (0, 1), (i64::MIN, 0), (-7, -3)] {
         assert_eq!(unsafe { f(a, b) }, a.wrapping_sub(b), "({a},{b})");
@@ -116,9 +92,7 @@ fn cpp_sub() {
 
 #[test]
 fn cpp_mul() {
-    let Some(m) = try_jit(include_str!("testdata/mul.cpp"), "mul") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/mul.cpp"), "mul");
     let f: Fn2 = unsafe { m.entry() };
     for (a, b) in [(6, 7), (-3, 4), (0, 100), (123_456, 789), (-1, i64::MIN)] {
         assert_eq!(unsafe { f(a, b) }, a.wrapping_mul(b), "({a},{b})");
@@ -127,9 +101,7 @@ fn cpp_mul() {
 
 #[test]
 fn cpp_mad() {
-    let Some(m) = try_jit(include_str!("testdata/mad.cpp"), "mad") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/mad.cpp"), "mad");
     let f: Fn3 = unsafe { m.entry() };
     for (a, b, c) in [(2, 3, 4), (-1, 10, 5), (0, 999, -7), (i64::MAX, 0, 1)] {
         let want = a.wrapping_mul(b).wrapping_add(c);
@@ -139,9 +111,7 @@ fn cpp_mad() {
 
 #[test]
 fn cpp_cube_sum() {
-    let Some(m) = try_jit(include_str!("testdata/cube_sum.cpp"), "cube_sum") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/cube_sum.cpp"), "cube_sum");
     let f: Fn2 = unsafe { m.entry() };
     for (x, y) in [(1_i64, 2), (3, 5), (-4, 7), (0, 9), (-10, -3)] {
         let sum = x.wrapping_add(y);
@@ -152,12 +122,10 @@ fn cpp_cube_sum() {
 
 #[test]
 fn cpp_diff_squares() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/diff_squares.cpp"),
         "diff_squares",
-    ) else {
-        return;
-    };
+    );
     let f: Fn2 = unsafe { m.entry() };
     for (a, b) in [(3_i64, 2_i64), (10, 1), (-5, 4), (7, -7), (100, 99)] {
         let want = a.wrapping_mul(a).wrapping_sub(b.wrapping_mul(b));
@@ -167,9 +135,7 @@ fn cpp_diff_squares() {
 
 #[test]
 fn cpp_horner() {
-    let Some(m) = try_jit(include_str!("testdata/horner.cpp"), "horner") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/horner.cpp"), "horner");
     let f: Fn1 = unsafe { m.entry() };
     let reference = |x: i64| -> i64 {
         let mut p: i64 = 3;
@@ -186,12 +152,10 @@ fn cpp_horner() {
 
 #[test]
 fn cpp_weighted_sum() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/weighted_sum.cpp"),
         "weighted_sum",
-    ) else {
-        return;
-    };
+    );
     let f: Fn4 = unsafe { m.entry() };
     for (a, b, c, d) in [
         (1, 1, 1, 1),
@@ -206,9 +170,7 @@ fn cpp_weighted_sum() {
 
 #[test]
 fn cpp_six_args() {
-    let Some(m) = try_jit(include_str!("testdata/six_args.cpp"), "six_args") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/six_args.cpp"), "six_args");
     let f: Fn6 = unsafe { m.entry() };
     for (a, b, c, d, e, g) in [
         (1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 6_i64),
@@ -231,12 +193,10 @@ fn cpp_six_args() {
 
 #[test]
 fn cpp_stress_arith() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/stress_arith.cpp"),
         "stress_arith",
-    ) else {
-        return;
-    };
+    );
     let f: Fn2 = unsafe { m.entry() };
     let reference = |a: i64, b: i64| -> i64 {
         let t1 = a.wrapping_add(b);
@@ -260,12 +220,10 @@ fn cpp_stress_arith() {
 
 #[test]
 fn cpp_fib_unrolled() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/fib_unrolled.cpp"),
         "fib_unrolled",
-    ) else {
-        return;
-    };
+    );
     let f: Fn1 = unsafe { m.entry() };
     let reference = |seed: i64| -> i64 {
         let mut a = seed;
@@ -290,9 +248,7 @@ fn cpp_fib_unrolled() {
 
 #[test]
 fn cpp_abs_val() {
-    let Some(m) = try_jit(include_str!("testdata/abs_val.cpp"), "abs_val") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/abs_val.cpp"), "abs_val");
     let f: Fn1 = unsafe { m.entry() };
     for x in [0_i64, 1, -1, 42, -42, i64::MAX] {
         assert_eq!(unsafe { f(x) }, x.wrapping_abs(), "x={x}");
@@ -301,9 +257,7 @@ fn cpp_abs_val() {
 
 #[test]
 fn cpp_my_max() {
-    let Some(m) = try_jit(include_str!("testdata/my_max.cpp"), "my_max") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/my_max.cpp"), "my_max");
     let f: Fn2 = unsafe { m.entry() };
     for (a, b) in [(1, 2), (5, 3), (-1, -1), (i64::MIN, i64::MAX)] {
         assert_eq!(unsafe { f(a, b) }, a.max(b), "({a},{b})");
@@ -312,9 +266,7 @@ fn cpp_my_max() {
 
 #[test]
 fn cpp_clamp() {
-    let Some(m) = try_jit(include_str!("testdata/clamp.cpp"), "clamp") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/clamp.cpp"), "clamp");
     let f: Fn3 = unsafe { m.entry() };
     for (x, lo, hi) in [(5, 0, 10), (-3, 0, 10), (100, 0, 10), (7, 7, 7)] {
         assert_eq!(unsafe { f(x, lo, hi) }, x.clamp(lo, hi), "({x},{lo},{hi})");
@@ -323,9 +275,7 @@ fn cpp_clamp() {
 
 #[test]
 fn cpp_sign() {
-    let Some(m) = try_jit(include_str!("testdata/sign.cpp"), "sign") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/sign.cpp"), "sign");
     let f: Fn1 = unsafe { m.entry() };
     for x in [-5_i64, -1, 0, 1, 5, i64::MAX, i64::MIN] {
         assert_eq!(unsafe { f(x) }, x.signum(), "x={x}");
@@ -334,9 +284,7 @@ fn cpp_sign() {
 
 #[test]
 fn cpp_fib_iter() {
-    let Some(m) = try_jit(include_str!("testdata/fib_iter.cpp"), "fib_iter") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/fib_iter.cpp"), "fib_iter");
     let f: Fn1 = unsafe { m.entry() };
     let fib = |n: i64| -> i64 {
         let (mut a, mut b) = (0i64, 1i64);
@@ -354,12 +302,10 @@ fn cpp_fib_iter() {
 
 #[test]
 fn cpp_fib_recursive() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/fib_recursive.cpp"),
         "fib_recursive",
-    ) else {
-        return;
-    };
+    );
     let f: Fn1 = unsafe { m.entry() };
     fn rfib(n: i64) -> i64 {
         if n < 2 { n } else { rfib(n - 1) + rfib(n - 2) }
@@ -371,12 +317,10 @@ fn cpp_fib_recursive() {
 
 #[test]
 fn cpp_factorial_iter() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/factorial_iter.cpp"),
         "factorial_iter",
-    ) else {
-        return;
-    };
+    );
     let f: Fn1 = unsafe { m.entry() };
     let fact = |n: i64| -> i64 {
         let mut r = 1i64;
@@ -394,9 +338,7 @@ fn cpp_factorial_iter() {
 
 #[test]
 fn cpp_gcd_euclid() {
-    let Some(m) = try_jit(include_str!("testdata/gcd_euclid.cpp"), "gcd_euclid") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/gcd_euclid.cpp"), "gcd_euclid");
     let f: Fn2 = unsafe { m.entry() };
     fn gcd(mut a: i64, mut b: i64) -> i64 {
         while b != 0 {
@@ -413,9 +355,7 @@ fn cpp_gcd_euclid() {
 
 #[test]
 fn cpp_pow_int() {
-    let Some(m) = try_jit(include_str!("testdata/pow_int.cpp"), "pow_int") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/pow_int.cpp"), "pow_int");
     let f: Fn2 = unsafe { m.entry() };
     fn pw(mut base: i64, mut exp: i64) -> i64 {
         let mut r: i64 = 1;
@@ -435,9 +375,7 @@ fn cpp_pow_int() {
 
 #[test]
 fn cpp_sum_to_n() {
-    let Some(m) = try_jit(include_str!("testdata/sum_to_n.cpp"), "sum_to_n") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/sum_to_n.cpp"), "sum_to_n");
     let f: Fn1 = unsafe { m.entry() };
     for n in [0_i64, 1, 10, 100, 1000] {
         let want = (1..=n).sum::<i64>();
@@ -445,11 +383,16 @@ fn cpp_sum_to_n() {
     }
 }
 
+// TODO: `std::vector<long>::push_back` emits an out-of-line
+// `_M_realloc_insert` template instantiation that only lives in the
+// .o file produced by clang — not in `libstdc++.so`. Our JIT reads
+// only the LLVM IR, so `dlsym` can't find that symbol at load time.
+// Proper support needs either an .o-file loader alongside the IR or
+// an IR-level re-translation of the template body.
 #[test]
+#[ignore = "needs .o-file loading: vector template instantiations aren't in libstdc++.so"]
 fn cpp_vector_sum() {
-    let Some(m) = try_jit(include_str!("testdata/vector_sum.cpp"), "vector_sum") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/vector_sum.cpp"), "vector_sum");
     let f: Fn1 = unsafe { m.entry() };
     for n in [0_i64, 1, 5, 10, 100] {
         let want = (1..=n).sum::<i64>();
@@ -457,14 +400,16 @@ fn cpp_vector_sum() {
     }
 }
 
+// TODO: std::vector + std::sort require full libstdc++ cooperation
+// (new/delete, comparator instantiation, iterator traits). Same
+// caveat as `cpp_string_build`.
 #[test]
+#[ignore = "depends on libstdc++ ABI quirks beyond the JIT's current reach"]
 fn cpp_vector_sort_median() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/vector_sort_median.cpp"),
         "vector_sort_median",
-    ) else {
-        return;
-    };
+    );
     let f: Fn3 = unsafe { m.entry() };
     for (a, b, c) in [(1, 2, 3), (3, 1, 2), (5, 5, 5), (-1, -2, -3), (10, 0, 5)] {
         let mut v = [a, b, c];
@@ -473,14 +418,17 @@ fn cpp_vector_sort_median() {
     }
 }
 
+// TODO: `std::map<long,long>::operator[]` is a template instantiation
+// emitted inside the user's .o file; it isn't part of `libstdc++.so`,
+// so `dlsym` can't resolve it from the IR alone. Same infrastructure
+// need as `cpp_vector_sum` — a real C++ runtime story for the JIT.
 #[test]
+#[ignore = "needs .o-file loading: map template instantiations aren't in libstdc++.so"]
 fn cpp_map_square_lookup() {
-    let Some(m) = try_jit(
+    let m = jit_or_panic(
         include_str!("testdata/map_square_lookup.cpp"),
         "map_square_lookup",
-    ) else {
-        return;
-    };
+    );
     let f: Fn1 = unsafe { m.entry() };
     for key in [0_i64, 1, 5, 9, 10, -1] {
         let want = if (0..10).contains(&key) { key * key } else { -1 };
@@ -488,11 +436,15 @@ fn cpp_map_square_lookup() {
     }
 }
 
+// TODO: std::string construction requires calling into libstdc++'s
+// `_M_construct` helpers; the JIT's direct `dlsym`-resolved call
+// works but the SSO + heap-pointer interplay and mangled-symbol
+// contract produces a garbage read — investigate once we have a
+// C++ runtime story.
 #[test]
+#[ignore = "depends on libstdc++ ABI quirks beyond the JIT's current reach"]
 fn cpp_string_build() {
-    let Some(m) = try_jit(include_str!("testdata/string_build.cpp"), "string_build") else {
-        return;
-    };
+    let m = jit_or_panic(include_str!("testdata/string_build.cpp"), "string_build");
     let f: Fn1 = unsafe { m.entry() };
     for n in [0_i64, 1, 16, 32, 64, 1024] {
         assert_eq!(unsafe { f(n) }, n, "n={n}");

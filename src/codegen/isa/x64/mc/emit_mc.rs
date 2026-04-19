@@ -111,12 +111,17 @@ fn scratch_demand_of(inst: &X64Inst) -> usize {
         | X64Inst::Shr64ri8 { .. }
         | X64Inst::Sar64ri8 { .. }
         | X64Inst::Setcc8r { .. }
-        | X64Inst::Call64r { .. } => 1,
+        | X64Inst::Call64r { .. }
+        | X64Inst::Jmp64r { .. } => 1,
         // Div/IDiv: divisor is the only vreg that isn't pre-bound. The
         // rest are pinned to RAX/RDX and physically live there at the
         // call site.
         X64Inst::Idiv64r { .. } | X64Inst::Div64r { .. } => 1,
-        X64Inst::Jmp { .. } | X64Inst::CondJmp { .. } | X64Inst::RawRet => 0,
+        X64Inst::Jmp { .. }
+        | X64Inst::CondJmp { .. }
+        | X64Inst::RawRet
+        | X64Inst::Ud2
+        | X64Inst::Mfence => 0,
     }
 }
 
@@ -218,6 +223,31 @@ pub struct FnMCWriter<'i> {
     frame_adjust: u32,
     saved_callee_regs: Vec<Reg>,
     splits_by_point: HashMap<ProgramPoint, Vec<SplitMove>>,
+    /// `addr_vreg -> iced_inst_index`, populated as the emitter
+    /// renders each call-site `Mov64ri`. After assembly we use
+    /// `CodeAssemblerResult::new_instruction_offsets` to look up each
+    /// instruction's final byte offset.
+    call_target_insts: HashMap<Reg, usize>,
+    /// For each `PseudoInstruction::StackAlloc { dst, .. }`, the
+    /// `rbp`-relative displacement at which the allocated region
+    /// begins. Emitting the pseudo materializes `lea dst, [rbp+disp]`.
+    alloca_offsets: HashMap<Reg, i32>,
+}
+
+/// One symbol-patch request: byte offset in the emitted buffer where
+/// an 8-byte placeholder immediate lives, plus the symbol to resolve.
+/// The symbol string is empty for indirect calls (no patching needed).
+#[derive(Clone, Debug)]
+pub struct EmittedCallReloc {
+    pub imm_offset: usize,
+    pub symbol: String,
+}
+
+/// Output of `emit_fn`: the raw code bytes plus every call-site
+/// relocation that needs to be patched before the bytes are executed.
+pub struct EmittedFunc {
+    pub bytes: Vec<u8>,
+    pub relocations: Vec<EmittedCallReloc>,
 }
 
 impl<'i> FnMCWriter<'i> {
@@ -227,7 +257,9 @@ impl<'i> FnMCWriter<'i> {
         ra_cfg: &'i RegAllocConfig,
         ra_res: &'i RegAllocResult,
     ) -> Self {
-        let raw_frame = ra_res.frame_size;
+        let (alloca_extra, alloca_offsets) =
+            Self::compute_alloca_layout(func, ra_res.frame_size);
+        let raw_frame = ra_res.frame_size + alloca_extra;
         let frame_adjust = raw_frame.div_ceil(16) * 16;
         let saved_callee_regs = Self::compute_saved_callee_regs(ra_cfg, ra_res);
         let layout = BlockLayout::compute(func);
@@ -244,7 +276,50 @@ impl<'i> FnMCWriter<'i> {
             frame_adjust,
             saved_callee_regs,
             splits_by_point,
+            call_target_insts: HashMap::new(),
+            alloca_offsets,
         }
+    }
+
+    /// Scan the func for `StackAlloc` pseudos, pack each below the
+    /// spill region, and return `(extra_frame_bytes, vreg → rbp-disp)`.
+    /// Each alloca's displacement is negative — `rbp + disp` is the
+    /// lowest address of its allocated region, so the pointer is
+    /// properly aligned to the requested `align`.
+    fn compute_alloca_layout(
+        func: &'i Func<X64Inst>,
+        ra_frame_size: u32,
+    ) -> (u32, HashMap<Reg, i32>) {
+        let mut running: u32 = ra_frame_size;
+        let mut offsets: HashMap<Reg, i32> = HashMap::new();
+        for (_b, bd) in func.blocks_iter() {
+            for inst in bd.iter() {
+                if let Instruction::Pseudo(PseudoInstruction::StackAlloc {
+                    dst,
+                    size,
+                    align,
+                }) = inst
+                {
+                    // Grow running offset by `size`, then round up to
+                    // `align` so the allocation's *low* address is
+                    // aligned.
+                    let new_running = (running + *size).next_multiple_of(*align);
+                    offsets.insert(*dst, -(new_running as i32));
+                    running = new_running;
+                }
+            }
+        }
+        (running - ra_frame_size, offsets)
+    }
+
+    /// Mark vreg `v` as the address operand of an upcoming call-site
+    /// `Mov64ri`. The next time we emit a Mov64ri whose destination is
+    /// `v` we'll record its iced instruction index so we can look up
+    /// its byte offset after assembly.
+    pub fn mark_call_target(&mut self, v: Reg) {
+        // Use `usize::MAX` as "pending" sentinel; replaced with the
+        // real iced index inside `emit_inst`.
+        self.call_target_insts.insert(v, usize::MAX);
     }
 
     fn compute_saved_callee_regs(ra_cfg: &RegAllocConfig, ra_res: &RegAllocResult) -> Vec<Reg> {
@@ -443,6 +518,12 @@ impl<'i> FnMCWriter<'i> {
                 }
             }
             X64Inst::Mov64ri { dst, imm } => {
+                // Before emitting, if `dst` is a call-target vreg, the
+                // index of the iced instruction we're about to append
+                // is the current length of `self.asm.instructions()`.
+                if let Some(slot) = self.call_target_insts.get_mut(&dst) {
+                    *slot = self.asm.instructions().len();
+                }
                 let dst_r = self.prepare_def(dst, def_pt, 0);
                 self.asm.mov(dst_r, imm).expect("mov r, imm64");
                 self.store_def(dst, def_pt, 0);
@@ -860,6 +941,16 @@ impl<'i> FnMCWriter<'i> {
                 }
                 self.asm.jmp(not_taken_lbl).expect("jmp fallthrough");
             }
+            X64Inst::Jmp64r { target } => {
+                let t_r = self.load_use(target, use_pt, 0);
+                self.asm.jmp(t_r).expect("jmp r");
+            }
+            X64Inst::Ud2 => {
+                self.asm.ud2().expect("ud2");
+            }
+            X64Inst::Mfence => {
+                self.asm.mfence().expect("mfence");
+            }
             X64Inst::RawRet => self.emit_epilogue(),
         }
     }
@@ -924,8 +1015,16 @@ impl<'i> FnMCWriter<'i> {
             PseudoInstruction::CallPseudo { .. } => {
                 panic!("CallPseudo should have been lowered to a target CALL before emission");
             }
-            PseudoInstruction::StackAlloc { .. } => {
-                panic!("StackAlloc should have been consumed by the prologue pass before emission");
+            PseudoInstruction::StackAlloc { dst, .. } => {
+                let disp = *self.alloca_offsets.get(&dst).unwrap_or_else(|| {
+                    panic!("StackAlloc for vreg {dst} has no computed frame offset")
+                });
+                let dst_preg = self.prepare_def_preg(dst, def_pt, 0);
+                let dst_r = to_ice_reg(dst_preg);
+                self.asm
+                    .lea(dst_r, rbp + i64::from(disp))
+                    .expect("lea rbp-rel for stack alloca");
+                self.store_def(dst, def_pt, 0);
             }
             PseudoInstruction::FrameSetup | PseudoInstruction::FrameDestroy => {
                 panic!("Frame markers should have been replaced by prologue/epilogue sequences");
@@ -933,16 +1032,36 @@ impl<'i> FnMCWriter<'i> {
             PseudoInstruction::ImplicitDef { .. }
             | PseudoInstruction::Kill { .. }
             | PseudoInstruction::RegDef { .. } => {
-                // Erased by pseudo cleanup. If one reaches MC emission it's a
-                // pipeline bug, not an operand worth encoding.
-                panic!("{p:?} should have been erased by pseudo cleanup before emission");
+                // No separate pseudo_cleanup pass runs today. These pseudos
+                // carry regalloc-only information (pins, undef defs,
+                // explicit live-range endpoints) and emit no machine code.
             }
         }
     }
 
     pub fn emit_fn(&mut self) -> Vec<u8> {
+        self.emit_fn_with_relocs(&[]).bytes
+    }
+
+    /// Full emission path that surfaces call-site relocations so the
+    /// loader can patch the placeholder immediate in each call-target
+    /// `Mov64ri`. Pass `call_sites` from the ABI lowering pass —
+    /// their `addr_vreg` fields mark which `Mov64ri` destinations we
+    /// need to track by iced instruction index, and whose final byte
+    /// offset we compute via `CodeAssemblerResult::new_instruction_offsets`.
+    pub fn emit_fn_with_relocs(
+        &mut self,
+        call_sites: &[crate::codegen::passes::CallSite],
+    ) -> EmittedFunc {
         self.check_scratch_budget();
         self.emit_prologue();
+
+        // Register tracked addr vregs up front.
+        for cs in call_sites {
+            if !cs.symbol.is_empty() {
+                self.mark_call_target(cs.addr_vreg);
+            }
+        }
 
         let mut labels: Vec<CodeLabel> = (0..self.func.blocks_count())
             .map(|_| self.asm.create_label())
@@ -971,7 +1090,40 @@ impl<'i> FnMCWriter<'i> {
                 }
             }
         }
-        self.asm.assemble(0).expect("assemble")
+
+        use iced_x86::BlockEncoderOptions;
+        let res = self
+            .asm
+            .assemble_options(0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)
+            .expect("assemble_options");
+
+        // Build relocations. For each call site whose addr_vreg was
+        // tracked, find its iced instruction offset and add 2 (REX +
+        // opcode byte) to reach the 8-byte immediate.
+        let mut relocations = Vec::with_capacity(call_sites.len());
+        for cs in call_sites {
+            if cs.symbol.is_empty() {
+                continue; // indirect call — no patch needed
+            }
+            let Some(&iced_idx) = self.call_target_insts.get(&cs.addr_vreg) else {
+                continue;
+            };
+            assert!(
+                iced_idx != usize::MAX,
+                "call-target Mov64ri for vreg {} was never emitted",
+                cs.addr_vreg
+            );
+            let inst_offset = res.inner.new_instruction_offsets[iced_idx] as usize;
+            relocations.push(EmittedCallReloc {
+                imm_offset: inst_offset + 2, // MOV r64,imm64 = REX(1)+opcode(1)+imm(8)
+                symbol: cs.symbol.clone(),
+            });
+        }
+
+        EmittedFunc {
+            bytes: res.inner.code_buffer,
+            relocations,
+        }
     }
 }
 

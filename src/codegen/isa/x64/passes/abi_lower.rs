@@ -21,9 +21,10 @@
 use std::collections::HashMap;
 
 use crate::codegen::isa::x64::inst::X64Inst;
-use crate::codegen::isa::x64::sysv::SysVAmd64;
-use crate::codegen::passes::{AbiLowering, AbiLowerResult};
-use crate::codegen::tir::{Func, Instruction, PseudoInstruction, Reg};
+use crate::codegen::isa::x64::regs::{R10, R11, RAX};
+use crate::codegen::isa::x64::sysv::{INT_ARG_REGS, SysVAmd64};
+use crate::codegen::passes::{AbiLowering, AbiLowerResult, CallSite};
+use crate::codegen::tir::{CallTarget, Func, Instruction, PseudoInstruction, Reg};
 
 pub struct SysVAmd64Lowering;
 
@@ -31,6 +32,7 @@ impl AbiLowering<X64Inst> for SysVAmd64Lowering {
     fn lower(&self, func: &mut Func<X64Inst>) -> AbiLowerResult {
         let cc = SysVAmd64;
         let mut reg_bind: HashMap<Reg, Reg> = HashMap::new();
+        let mut call_sites: Vec<CallSite> = Vec::new();
         let block_ids: Vec<_> = func.blocks_iter().map(|(b, _)| b).collect();
 
         for block in block_ids {
@@ -66,14 +68,126 @@ impl AbiLowering<X64Inst> for SysVAmd64Lowering {
                         }));
                         new.push(Instruction::Target(X64Inst::RawRet));
                     }
+                    Instruction::Pseudo(PseudoInstruction::CallPseudo { id }) => {
+                        lower_call(
+                            id,
+                            func,
+                            &mut new,
+                            &mut reg_bind,
+                            &mut call_sites,
+                        );
+                    }
                     other => new.push(other),
                 }
             }
             func.get_block_data_mut(block).set_insts(new);
         }
 
-        AbiLowerResult { reg_bind }
+        AbiLowerResult { reg_bind, call_sites }
     }
+}
+
+fn lower_call(
+    id: crate::codegen::tir::CallId,
+    func: &mut Func<X64Inst>,
+    new: &mut Vec<Instruction<X64Inst>>,
+    reg_bind: &mut HashMap<Reg, Reg>,
+    call_sites: &mut Vec<CallSite>,
+) {
+    // Snapshot the CallData's fields we need; the side-table might be
+    // mutated below if we ever add spill vregs.
+    let call_data = func.call_operands(id).clone();
+    let args = call_data.args;
+    let rets = call_data.rets;
+    assert!(
+        args.len() <= INT_ARG_REGS.len(),
+        "stack-passed args not yet supported ({} args > {})",
+        args.len(),
+        INT_ARG_REGS.len()
+    );
+    assert!(
+        rets.len() <= 1,
+        "multiple-return calls not yet supported"
+    );
+
+    // Copy each user-arg vreg into a fresh shim vreg pinned to the
+    // SysV arg preg. The shim's life is from Copy to Call64r, so it
+    // occupies the arg preg across that window.
+    let mut arg_shims: Vec<Reg> = Vec::with_capacity(args.len());
+    for (i, user_arg) in args.iter().copied().enumerate() {
+        let shim = func.new_vreg();
+        reg_bind.insert(shim, INT_ARG_REGS[i]);
+        new.push(Instruction::Pseudo(PseudoInstruction::Copy {
+            dst: shim,
+            src: user_arg,
+        }));
+        arg_shims.push(shim);
+    }
+
+    // Clobber markers for caller-saved pregs NOT holding the first
+    // `args.len()` arg regs. Each clobber vreg is defined and pinned
+    // to its preg at a point right before the call's target load —
+    // any user vreg still live in that preg must get evicted /
+    // split-spilled ahead of this point so the JIT-callee can stomp
+    // on the preg freely.
+    //
+    for &preg in &[R10, R11] {
+        emit_clobber(func, new, reg_bind, preg);
+    }
+    for (i, &arg_preg) in INT_ARG_REGS.iter().enumerate() {
+        if i >= args.len() {
+            emit_clobber(func, new, reg_bind, arg_preg);
+        }
+    }
+    emit_clobber(func, new, reg_bind, RAX);
+
+    // Load callee address. The immediate is a placeholder the loader
+    // patches at Module::load time.
+    let addr_vreg = func.new_vreg();
+    new.push(Instruction::Target(X64Inst::Mov64ri {
+        dst: addr_vreg,
+        imm: 0, // placeholder, patched at load time
+    }));
+
+    // Emit the call.
+    new.push(Instruction::Target(X64Inst::Call64r { target: addr_vreg }));
+
+    // Extract the return value: define ret_shim pinned to RAX, copy
+    // into the user's return vreg.
+    if let Some(&user_ret) = rets.first() {
+        let ret_shim = func.new_vreg();
+        reg_bind.insert(ret_shim, RAX);
+        new.push(Instruction::Pseudo(PseudoInstruction::RegDef {
+            vreg: ret_shim,
+            preg: RAX,
+        }));
+        new.push(Instruction::Pseudo(PseudoInstruction::Copy {
+            dst: user_ret,
+            src: ret_shim,
+        }));
+    }
+
+    // Record this call's symbol-patch request.
+    let symbol = match call_data.callee {
+        CallTarget::Symbol(s) => s,
+        CallTarget::Indirect(_) => String::new(), // no patching needed
+    };
+    call_sites.push(CallSite { addr_vreg, symbol });
+}
+
+fn emit_clobber(
+    func: &mut Func<X64Inst>,
+    new: &mut Vec<Instruction<X64Inst>>,
+    reg_bind: &mut HashMap<Reg, Reg>,
+    preg: Reg,
+) {
+    let v = func.new_vreg();
+    reg_bind.insert(v, preg);
+    new.push(Instruction::Pseudo(PseudoInstruction::ImplicitDef { dst: v }));
+    new.push(Instruction::Pseudo(PseudoInstruction::RegDef {
+        vreg: v,
+        preg,
+    }));
 }
 
 #[cfg(test)]

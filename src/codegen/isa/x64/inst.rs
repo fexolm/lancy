@@ -223,6 +223,16 @@ pub enum X64Inst {
     // Control flow.
     Jmp { dst: Block },
     CondJmp { cond: Cond, taken: Block, not_taken: Block },
+    /// Unconditional indirect jump through a register. Used for
+    /// `indirectbr` lowering (no label operand — the target is an
+    /// address already in a vreg).
+    Jmp64r { target: Reg },
+    /// Undefined-instruction trap (`ud2`). Emitted for LLVM IR
+    /// `unreachable` — if execution reaches this, it faults.
+    Ud2,
+    /// Full memory fence (`mfence`). Lowers LLVM `fence` with seq_cst
+    /// semantics. No operands.
+    Mfence,
     // Raw RET — assumes ABI return register is already set and the frame has
     // been torn down. Emitted by the prologue/epilogue pass.
     RawRet,
@@ -230,11 +240,21 @@ pub enum X64Inst {
 
 impl Inst for X64Inst {
     fn is_branch(&self) -> bool {
-        matches!(self, X64Inst::Jmp { .. } | X64Inst::CondJmp { .. })
+        matches!(
+            self,
+            X64Inst::Jmp { .. } | X64Inst::CondJmp { .. } | X64Inst::Jmp64r { .. }
+        )
     }
 
     fn is_ret(&self) -> bool {
         matches!(self, X64Inst::RawRet)
+    }
+
+    fn is_term(&self) -> bool {
+        // `Ud2` terminates the block (execution faults) even though
+        // it's neither a branch nor a return; override the trait
+        // default to cover it.
+        self.is_branch() || self.is_ret() || matches!(self, X64Inst::Ud2)
     }
 
     fn get_uses(&self) -> SmallVec<[Reg; 2]> {
@@ -296,8 +316,11 @@ impl Inst for X64Inst {
             }
             X64Inst::Cmov64rr { dst, src, .. } => smallvec![*dst, *src],
             X64Inst::Setcc8r { .. } => smallvec![],
-            X64Inst::Call64r { target } => smallvec![*target],
-            X64Inst::Jmp { .. } | X64Inst::CondJmp { .. } => smallvec![],
+            X64Inst::Call64r { target } | X64Inst::Jmp64r { target } => smallvec![*target],
+            X64Inst::Jmp { .. }
+            | X64Inst::CondJmp { .. }
+            | X64Inst::Ud2
+            | X64Inst::Mfence => smallvec![],
         }
     }
 
@@ -359,6 +382,9 @@ impl Inst for X64Inst {
             | X64Inst::Call64r { .. }
             | X64Inst::Jmp { .. }
             | X64Inst::CondJmp { .. }
+            | X64Inst::Jmp64r { .. }
+            | X64Inst::Ud2
+            | X64Inst::Mfence
             | X64Inst::RawRet => smallvec![],
         }
     }
@@ -367,8 +393,34 @@ impl Inst for X64Inst {
         match self {
             X64Inst::Jmp { dst } => smallvec![*dst],
             X64Inst::CondJmp { taken, not_taken, .. } => smallvec![*taken, *not_taken],
+            // Indirect jumps and `ud2` have no lancy-level block
+            // targets (for Jmp64r, the target is an address, not a
+            // block label we can analyze).
             _ => smallvec![],
         }
+    }
+
+    fn rewrite_branch_target(&mut self, old: Block, new: Block) {
+        match self {
+            X64Inst::Jmp { dst } => {
+                if *dst == old {
+                    *dst = new;
+                }
+            }
+            X64Inst::CondJmp { taken, not_taken, .. } => {
+                if *taken == old {
+                    *taken = new;
+                }
+                if *not_taken == old {
+                    *not_taken = new;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn new_jmp(target: Block) -> Self {
+        X64Inst::Jmp { dst: target }
     }
 }
 
@@ -495,6 +547,9 @@ impl Display for X64Inst {
             X64Inst::CondJmp { cond, taken, not_taken } => {
                 write!(f, "j{cond} {taken} else {not_taken}")
             }
+            X64Inst::Jmp64r { target } => write!(f, "jmp {}", reg_name(*target)),
+            X64Inst::Ud2 => f.write_str("ud2"),
+            X64Inst::Mfence => f.write_str("mfence"),
             X64Inst::RawRet => f.write_str("ret"),
         }
     }

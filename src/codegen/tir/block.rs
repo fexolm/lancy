@@ -73,6 +73,10 @@ impl<I: Inst> BlockData<I> {
         &self.insts
     }
 
+    pub fn insts_mut(&mut self) -> &mut Vec<Instruction<I>> {
+        &mut self.insts
+    }
+
     pub fn take_insts(&mut self) -> Vec<Instruction<I>> {
         std::mem::take(&mut self.insts)
     }

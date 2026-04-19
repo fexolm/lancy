@@ -93,3 +93,140 @@ fn branch_equals_returns_boolean_i64() {
     assert_eq!(unsafe { f(0, 0) }, 1);
     assert_eq!(unsafe { f(i64::MIN, i64::MAX) }, 0);
 }
+
+const FIB_LOOP_IR: &str = r#"
+define i64 @fib_iter(i64 %n) {
+entry:
+  %cond = icmp sgt i64 %n, 0
+  br i1 %cond, label %loop, label %exit
+
+loop:
+  %a = phi i64 [ 0, %entry ], [ %b, %loop ]
+  %i = phi i64 [ 0, %entry ], [ %inext, %loop ]
+  %b = phi i64 [ 1, %entry ], [ %next, %loop ]
+  %next = add nsw i64 %a, %b
+  %inext = add nuw nsw i64 %i, 1
+  %done = icmp eq i64 %inext, %n
+  br i1 %done, label %exit, label %loop
+
+exit:
+  %r = phi i64 [ 0, %entry ], [ %b, %loop ]
+  ret i64 %r
+}
+"#;
+
+const ALLOCA_ROUNDTRIP_IR: &str = r#"
+define i64 @alloca_roundtrip(i64 %x) {
+  %p = alloca i64, align 8
+  store i64 %x, ptr %p, align 8
+  %r = load i64, ptr %p, align 8
+  ret i64 %r
+}
+"#;
+
+#[test]
+fn alloca_store_load_roundtrip_jits() {
+    let m = compile_ir_to_jit(ALLOCA_ROUNDTRIP_IR.as_bytes(), "alloca_roundtrip")
+        .expect("jit");
+    let f: Fn1 = unsafe { m.entry() };
+    for x in [0_i64, 1, -1, i64::MIN, i64::MAX] {
+        assert_eq!(unsafe { f(x) }, x, "x={x}");
+    }
+}
+
+const GEP_ARRAY_IR: &str = r#"
+define i64 @array_read(i64 %i) {
+  %arr = alloca [4 x i64], align 16
+  %p0 = getelementptr inbounds [4 x i64], ptr %arr, i64 0, i64 0
+  store i64 10, ptr %p0, align 8
+  %p1 = getelementptr inbounds [4 x i64], ptr %arr, i64 0, i64 1
+  store i64 20, ptr %p1, align 8
+  %p2 = getelementptr inbounds [4 x i64], ptr %arr, i64 0, i64 2
+  store i64 30, ptr %p2, align 8
+  %p3 = getelementptr inbounds [4 x i64], ptr %arr, i64 0, i64 3
+  store i64 40, ptr %p3, align 8
+  %pi = getelementptr inbounds [4 x i64], ptr %arr, i64 0, i64 %i
+  %r = load i64, ptr %pi, align 8
+  ret i64 %r
+}
+"#;
+
+#[test]
+fn gep_into_alloca_array_reads_correct_element() {
+    let m = compile_ir_to_jit(GEP_ARRAY_IR.as_bytes(), "array_read").expect("jit");
+    let f: Fn1 = unsafe { m.entry() };
+    assert_eq!(unsafe { f(0) }, 10);
+    assert_eq!(unsafe { f(1) }, 20);
+    assert_eq!(unsafe { f(2) }, 30);
+    assert_eq!(unsafe { f(3) }, 40);
+}
+
+const SWITCH_IR: &str = r#"
+define i64 @select(i64 %x) {
+entry:
+  switch i64 %x, label %default [
+    i64 1, label %c1
+    i64 2, label %c2
+    i64 3, label %c3
+  ]
+
+c1:
+  ret i64 100
+
+c2:
+  ret i64 200
+
+c3:
+  ret i64 300
+
+default:
+  ret i64 -1
+}
+"#;
+
+const FENCE_FREEZE_IR: &str = r#"
+define i64 @fence_freeze(i64 %x) {
+  fence seq_cst
+  %y = freeze i64 %x
+  %z = add i64 %y, 1
+  ret i64 %z
+}
+"#;
+
+#[test]
+fn fence_and_freeze_lower_correctly() {
+    let m = compile_ir_to_jit(FENCE_FREEZE_IR.as_bytes(), "fence_freeze").expect("jit");
+    let f: Fn1 = unsafe { m.entry() };
+    for x in [0_i64, 1, -1, 41, i64::MAX - 1] {
+        assert_eq!(unsafe { f(x) }, x.wrapping_add(1), "x={x}");
+    }
+}
+
+#[test]
+fn switch_dispatches_each_case() {
+    let m = compile_ir_to_jit(SWITCH_IR.as_bytes(), "select").expect("jit");
+    let f: Fn1 = unsafe { m.entry() };
+    assert_eq!(unsafe { f(1) }, 100);
+    assert_eq!(unsafe { f(2) }, 200);
+    assert_eq!(unsafe { f(3) }, 300);
+    assert_eq!(unsafe { f(0) }, -1);
+    assert_eq!(unsafe { f(42) }, -1);
+}
+
+#[test]
+fn fib_iter_hand_written_via_phi_jits_correctly() {
+    let m = compile_ir_to_jit(FIB_LOOP_IR.as_bytes(), "fib_iter").expect("convert + jit");
+    let f: Fn1 = unsafe { m.entry() };
+    let fib = |n: i64| -> i64 {
+        let (mut a, mut b) = (0_i64, 1_i64);
+        for _ in 0..n {
+            let c = a.wrapping_add(b);
+            a = b;
+            b = c;
+        }
+        a
+    };
+    for n in [0_i64, 1, 2, 5, 10] {
+        assert_eq!(unsafe { f(n) }, fib(n), "n={n}");
+    }
+}

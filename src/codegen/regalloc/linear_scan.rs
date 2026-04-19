@@ -351,7 +351,18 @@ impl<'a> Allocator<'a> {
     }
 
     /// Evict a vreg currently in Reg(p) to a stack slot at `split_pt`.
-    /// Closes its Reg piece, opens a Stack piece, records the store move.
+    /// Closes its Reg piece, opens a Stack piece, records the store
+    /// moves.
+    ///
+    /// **Correctness across branches.** If u has multiple live-range
+    /// segments (e.g. post-SSA-destruction phi destinations with
+    /// Copies in several predecessors, or a value live in and live
+    /// out of a diamond), placing a SplitMove only at `split_pt`
+    /// leaves the stack slot uninitialized on paths that bypass
+    /// `split_pt`. We emit an additional SplitMove at the start of
+    /// every segment that starts on or before `split_pt`, so whichever
+    /// path is taken, the preg's value is mirrored to the stack slot
+    /// before any later read from the slot.
     fn evict_to_stack(&mut self, u: Reg, split_pt: ProgramPoint) {
         let AllocatedSlot::Reg(p) = self
             .current_slot[u as usize]
@@ -363,11 +374,63 @@ impl<'a> Allocator<'a> {
         let s = self.fresh_slot();
         self.current_slot[u as usize] = Some(AllocatedSlot::Stack(s));
         self.current_piece_start[u as usize] = split_pt;
+        // Primary SplitMove at split_pt.
         self.split_moves.push(SplitMove {
             at_point: split_pt,
             from_preg: p,
             to_slot: s,
         });
+        // When `u` has more than one segment, the primary SplitMove
+        // at `split_pt` only fires on paths that actually reach that
+        // point. For segments that don't reach `split_pt` (e.g. a
+        // branch-side def whose uses later read the stack slot), we
+        // emit an additional SplitMove that captures the preg's value
+        // immediately after the segment becomes live. Program points
+        // alternate `use_pt` (even) / `def_pt` (odd), and the
+        // emitter only fires SplitMoves that match an instruction's
+        // `def_pt`. So we map each segment start to the next `def_pt`
+        // where the preg has settled with `u`'s value:
+        //
+        // * segment starts at a block-entry `use_pt` (live-in): the
+        //   preg already carries `u` when the block opens — save
+        //   right before the first instruction runs, i.e. at that
+        //   instruction's `def_pt = start + 1`.
+        // * segment starts at a `def_pt` (u is produced by this
+        //   instruction): the preg holds `u` *after* the instruction
+        //   finishes — save just before the next instruction, i.e.
+        //   at `def_pt + 2` (which is the next instruction's `def_pt`).
+        let segs = self.ranges[u].segments().to_vec();
+        if segs.len() > 1 {
+            for seg in &segs {
+                if seg.start >= split_pt {
+                    break;
+                }
+                let save_pt = if seg.start % 2 == 0 {
+                    // Live-in segment: save at this block's first
+                    // instruction's def_pt.
+                    seg.start + 1
+                } else {
+                    // Def segment: save after the defining instruction
+                    // completes (i.e., at the next instruction's
+                    // def_pt).
+                    seg.start + 2
+                };
+                if save_pt >= split_pt {
+                    continue;
+                }
+                // Don't emit past the segment's own end — if the
+                // segment is just one point wide (dead def), there's
+                // no later instruction to save before.
+                if save_pt >= seg.end {
+                    continue;
+                }
+                self.split_moves.push(SplitMove {
+                    at_point: save_pt,
+                    from_preg: p,
+                    to_slot: s,
+                });
+            }
+        }
     }
 
     /// Commit the in-flight piece `[current_piece_start[v], end)` to

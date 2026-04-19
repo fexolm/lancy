@@ -146,7 +146,7 @@ fn fuzz_short_programs() {
 
 #[test]
 fn fuzz_pressure_programs() {
-    // Longer programs reliably exceed the 9-preg SysV allocatable pool and
+    // Longer programs reliably exceed the 11-preg SysV allocatable pool and
     // force spill/reload paths. Keep the count modest so the test runs in
     // well under a second.
     for seed in 1..=30 {

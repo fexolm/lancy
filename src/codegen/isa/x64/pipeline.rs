@@ -8,7 +8,9 @@ use crate::codegen::analysis::cfg::CFG;
 use crate::codegen::isa::x64::inst::X64Inst;
 use crate::codegen::isa::x64::mc::emit_mc::FnMCWriter;
 use crate::codegen::isa::x64::passes::abi_lower::SysVAmd64Lowering;
-use crate::codegen::isa::x64::regs::{R10, R11, R12, R13, R8, R9, RAX, RBX, RCX, RDI, RDX, RSI};
+use crate::codegen::isa::x64::regs::{
+    R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBX, RCX, RDI, RDX, RSI,
+};
 use crate::codegen::jit::{Module, Relocation};
 use crate::codegen::passes::{AbiLowering, destroy_ssa};
 use crate::codegen::regalloc::{LinearScan, RegAllocConfig, RegAllocator};
@@ -16,17 +18,23 @@ use crate::codegen::tir::{Func, Reg};
 use std::collections::HashMap;
 
 /// Build the default `SysV`-flavored `RegAllocConfig`. The allocatable pool is
-/// the nine caller-saved integer registers (`RAX/RCX/RDX/RSI/RDI/R8..R11`).
-/// `RBX`, `R12`, `R13` are reserved as spill scratches — they are
-/// callee-saved under `SysV`, so the MC emitter's prologue preserves them
-/// explicitly. Three scratches is the worst case needed by
+/// the nine caller-saved integer registers (`RAX/RCX/RDX/RSI/RDI/R8..R11`) plus
+/// two callee-saved (`R14, R15`). The MC emitter's prologue saves/restores any
+/// callee-saved regs the allocator actually hands out. `RBX`, `R12`, `R13` are
+/// reserved as spill scratches (callee-saved, also saved by the emitter when
+/// touched). Three scratches is the worst case needed by
 /// `Mov64rm { src: Mem { base, index: Some, .. }, dst }` when `base`,
 /// `index`, and `dst` are all spilled simultaneously.
+///
+/// Ordering matters: allocation uses `max_by_key` over a per-preg free-until
+/// point, and `max_by_key` returns the **last** element on ties. Callee-saved
+/// are placed *first* so that when every preg is equally free, a caller-saved
+/// register wins — keeping prologue/epilogue push/pop traffic minimal.
 #[must_use]
 pub fn default_ra_config(reg_bind: HashMap<Reg, Reg>) -> RegAllocConfig {
     RegAllocConfig {
         preg_count: 32,
-        allocatable_regs: vec![RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11],
+        allocatable_regs: vec![R14, R15, RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11],
         scratch_regs: vec![RBX, R12, R13],
         reg_bind,
     }
@@ -1501,6 +1509,21 @@ mod tests {
             bad, 0,
             "callee-saved bits clobbered across recursive stack-arg call: 0x{bad:x}"
         );
+    }
+
+    #[test]
+    fn default_ra_config_includes_callee_saved_regs_before_caller_saved() {
+        // Callee-saved come first so `max_by_key`'s last-on-tie semantics
+        // prefers caller-saved when both are equally free.
+        use crate::codegen::isa::x64::regs::*;
+        let cfg = default_ra_config(std::collections::HashMap::new());
+        assert_eq!(
+            cfg.allocatable_regs,
+            vec![R14, R15, RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11]
+        );
+        for s in &cfg.scratch_regs {
+            assert!(!cfg.allocatable_regs.contains(s), "scratch {s} overlaps allocatable");
+        }
     }
 
     #[test]

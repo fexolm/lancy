@@ -324,12 +324,31 @@ impl<'a> Allocator<'a> {
         }
     }
 
+    /// Walk the `Copy` chain from `v` and return the preg of the nearest
+    /// ancestor already in a Reg slot; `None` if the chain bottoms out on
+    /// a stack/unallocated link or cycles.
     fn copy_hint(&self, v: Reg) -> Option<Reg> {
-        let s = self.copy_src.get(v).copied().flatten()?;
-        match self.current_slot.get(s as usize)?.as_ref()? {
-            AllocatedSlot::Reg(p) if self.config.allocatable_regs.contains(p) => Some(*p),
-            _ => None,
+        let mut cur = self.copy_src.get(v).copied().flatten()?;
+        let mut visited = [u32::MAX; 16];
+        visited[0] = v;
+        let mut n = 1;
+        while n < visited.len() {
+            if visited[..n].contains(&cur) {
+                return None;
+            }
+            visited[n] = cur;
+            n += 1;
+            if let Some(AllocatedSlot::Reg(p)) = self
+                .current_slot
+                .get(cur as usize)
+                .and_then(|s| s.as_ref())
+                && self.config.allocatable_regs.contains(p)
+            {
+                return Some(*p);
+            }
+            cur = self.copy_src.get(cur).copied().flatten()?;
         }
+        None
     }
 
     // ---- Piece-lifecycle helpers ----
@@ -577,6 +596,38 @@ mod tests {
         let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);
         assert_eq!(uniform(&res, v0), AllocatedSlot::Reg(RDI));
         assert_eq!(uniform(&res, v1), AllocatedSlot::Reg(RDI));
+    }
+
+    #[test]
+    fn transitive_copy_hint_coalesces_a_three_link_chain_onto_one_preg() {
+        let mut func = Func::<X64Inst>::new("chain".into());
+        let b0 = func.add_empty_block();
+        let v0 = func.new_vreg();
+        let v1 = func.new_vreg();
+        let v2 = func.new_vreg();
+        let v3 = func.new_vreg();
+        let mut reg_bind = HashMap::new();
+        reg_bind.insert(v0, RDI);
+        {
+            let bd = func.get_block_data_mut(b0);
+            bd.push_pseudo_inst(PseudoInstruction::Arg { dst: v0, idx: 0 });
+            bd.push_pseudo_inst(PseudoInstruction::Copy { dst: v1, src: v0 });
+            bd.push_pseudo_inst(PseudoInstruction::Copy { dst: v2, src: v1 });
+            bd.push_pseudo_inst(PseudoInstruction::Copy { dst: v3, src: v2 });
+            bd.push_pseudo_inst(PseudoInstruction::Return { src: v3 });
+        }
+        let cfg = CFG::compute(&func).unwrap();
+        let cfg_cfg = RegAllocConfig {
+            preg_count: 32,
+            allocatable_regs: vec![RDI, RAX, RBX, RCX],
+            scratch_regs: vec![R12, R13],
+            reg_bind,
+        };
+        let res = LinearScan::allocate(&func, &cfg, &cfg_cfg);
+        assert_eq!(uniform(&res, v0), AllocatedSlot::Reg(RDI));
+        assert_eq!(uniform(&res, v1), AllocatedSlot::Reg(RDI));
+        assert_eq!(uniform(&res, v2), AllocatedSlot::Reg(RDI));
+        assert_eq!(uniform(&res, v3), AllocatedSlot::Reg(RDI));
     }
 
     #[test]
